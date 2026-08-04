@@ -1,0 +1,10 @@
+[
+  {
+    "case_id": "calculator-zero-divisor",
+    "repository": "examples/buggy_calculator",
+    "issue": "Fix safe_divide so a zero divisor raises ValueError.",
+    "expected_retrieval_path": "src/calculator.py",
+    "test_command": "python -m unittest discover -s tests"
+  }
+]
+

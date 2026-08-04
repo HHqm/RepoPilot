@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="RepoPilot：客户与产品经理持续协作、文件驱动 RAG、需求评审、研发测试和 ZIP 交付的软件公司多智能体工作台。"
+    />
+    <title>RepoPilot · 客户协作软件公司</title>
+    <link rel="icon" href="/assets/favicon.svg?v=0.6.0" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/styles.css?v=0.6.0" />
+    <script src="/assets/app.js?v=0.6.0" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="RepoPilot 首页">
+        <span class="brand-mark">RP</span>
+        <span>
+          <strong>RepoPilot</strong>
+          <small>CLIENT · PRODUCT · ENGINEERING</small>
+        </span>
+      </a>
+      <div class="topbar-center">
+        <span class="live-dot"></span>
+        <span id="systemText">客户协作工作台已就绪</span>
+      </div>
+      <div class="topbar-actions">
+        <span class="frontend-version">UI 0.6.0 · MULTI MODEL</span>
+        <span class="engine-chip">ROUTER <strong id="engineBadge">MOCK</strong></span>
+        <button id="openModelCenter" class="model-center-trigger" type="button">
+          <span>◈</span> 模型中心
+        </button>
+        <button id="themeToggle" class="icon-button" type="button" aria-label="切换主题">☼</button>
+        <a class="docs-link" href="/docs" target="_blank" rel="noreferrer">API ↗</a>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">CHAT WITH YOUR PRODUCT MANAGER NOW</p>
+          <h1>直接告诉产品经理，<br /><span>你想做什么软件。</span></h1>
+          <p class="hero-copy">
+            不用先填完表单。直接输入想法或上传需求文件，系统会自动建立项目会话；
+            产品经理负责追问、整理并把需求带入跨职能评审。
+          </p>
+        </div>
+        <div class="hero-metrics" aria-label="系统能力">
+          <div><strong id="agentCount">16</strong><span>团队角色</span></div>
+          <div><strong>2</strong><span>客户决策点</span></div>
+          <div><strong id="documentCount">0</strong><span>项目资料</span></div>
+          <div><strong id="runStatus">IDLE</strong><span>当前状态</span></div>
+        </div>
+      </section>
+
+      <section class="setup-card" id="setupCard">
+        <header class="section-heading">
+          <div>
+            <span class="section-index">00</span>
+            <div>
+              <p>START A PROJECT ROOM</p>
+              <h2>项目边界补充（可选）</h2>
+            </div>
+          </div>
+          <p>你可以先聊天，预算、期限、技术与部署条件也可以稍后在产品经理追问时确认。</p>
+        </header>
+        <form id="sessionForm" class="setup-form">
+          <label>
+            <span>项目名称 <em>可选</em></span>
+            <input id="projectName" maxlength="120" placeholder="不填写时会根据首条需求自动命名" />
+          </label>
+          <label>
+            <span>目标用户</span>
+            <input id="targetUsers" placeholder="例如：居民、社区工作人员、内网运维人员" />
+          </label>
+          <label>
+            <span>项目预算（CNY）</span>
+            <input id="budgetCny" type="number" min="0" max="1000000000" placeholder="例如：180000" />
+          </label>
+          <label>
+            <span>期望交付时间</span>
+            <input id="deliveryDeadline" placeholder="例如：8 周内完成可部署 MVP" />
+          </label>
+          <label>
+            <span>技术偏好</span>
+            <select id="preferredStack">
+              <option value="由架构团队评估">由架构团队评估</option>
+              <option value="Python">Python</option>
+              <option value="Java">Java</option>
+              <option value="Go">Go</option>
+              <option value="C++">C++</option>
+              <option value="TypeScript/JavaScript">TypeScript / JavaScript</option>
+            </select>
+          </label>
+          <label>
+            <span>部署目标</span>
+            <select id="deploymentTarget">
+              <option value="undecided">与 DevOps 共同确认</option>
+              <option value="local">本地运行</option>
+              <option value="intranet">企业内网</option>
+              <option value="docker">Docker / 单机容器</option>
+              <option value="kubernetes">Kubernetes</option>
+              <option value="public_cloud">公有云</option>
+              <option value="edge">边缘 / 嵌入式设备</option>
+            </select>
+          </label>
+          <label class="wide">
+            <span>政策、法律、政治与商业约束</span>
+            <textarea
+              id="constraints"
+              rows="2"
+              placeholder="每行一项，例如：数据不得出境；不能采购商业中间件；必须支持无障碍"
+            ></textarea>
+          </label>
+          <label class="model-setting">
+            <span>多模型路由</span>
+            <select id="llmMode">
+              <option value="mock">Mock · 确定性演示</option>
+              <option value="deepseek">DeepSeek · 服务端托管</option>
+              <option value="routed">Agent 级多供应商路由</option>
+            </select>
+            <small id="routeSummary">当前使用确定性 Mock，不会产生 API 费用</small>
+            <button id="configureModelsButton" class="inline-config-button" type="button">
+              配置供应商与 Agent 路由
+            </button>
+          </label>
+          <div class="setup-actions">
+            <button id="fillDemo" class="ghost-button" type="button">填入演示项目</button>
+            <button class="primary-button" id="createSessionButton" type="submit">
+              保存边界并开始对话 <span>→</span>
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <section class="collaboration-grid" id="collaborationWorkspace" aria-label="客户协作工作区">
+        <aside class="knowledge-panel panel">
+          <header class="panel-title">
+            <div>
+              <span class="section-index">01</span>
+              <div><p>PROJECT RAG</p><h2>项目资料库</h2></div>
+            </div>
+            <span class="status-pill" id="sessionBadge">首次操作自动创建</span>
+          </header>
+          <div class="project-identity">
+            <span>当前项目</span>
+            <strong id="currentProjectName">尚未命名的软件项目</strong>
+            <code id="sessionId">AUTO-CREATE ON FIRST MESSAGE</code>
+          </div>
+          <label class="upload-zone" id="uploadZone" for="fileInput">
+            <input
+              id="fileInput"
+              type="file"
+              multiple
+              accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.md,.txt,.csv,.json,.yaml,.yml,.xml,.html,.py,.js,.ts,.java,.go,.c,.cpp,.h,.hpp"
+            />
+            <span class="upload-icon">⇧</span>
+            <strong>上传客户资料</strong>
+            <small>PDF / Word / Excel / PPT / 文本 / 代码</small>
+            <em>单文件最大 25 MB；进入本项目隔离 RAG</em>
+          </label>
+          <div class="privacy-note">
+            <strong>资料边界</strong>
+            <p>原文件保存在本机项目空间；向模型提供的是按问题检索并脱敏后的相关片段。</p>
+          </div>
+          <div class="asset-list" id="assetList">
+            <p class="empty-state">还没有上传资料</p>
+          </div>
+          <div class="knowledge-flow" aria-label="知识流">
+            <span>客户文件</span><i>→</i><span>解析 / 脱敏</span><i>→</i><span>Qdrant</span><i>→</i><span>Agent</span>
+          </div>
+        </aside>
+
+        <section class="chat-panel panel">
+          <header class="chat-header">
+            <div class="agent-avatar avatar-product" aria-hidden="true"><i></i><b></b></div>
+            <div>
+              <p>YOUR PRODUCT MANAGER</p>
+              <h2>言澈 · 产品经理</h2>
+              <span><i class="online-dot"></i><span id="pmStatus">在线 · 可以直接开始沟通</span></span>
+            </div>
+            <button id="newProjectButton" class="text-button" type="button">新项目</button>
+          </header>
+          <div class="chat-kickoff" aria-label="聊天使用方式">
+            <span><b>1</b> 直接说需求</span>
+            <i>→</i>
+            <span><b>2</b> 产品经理追问</span>
+            <i>→</i>
+            <span><b>3</b> 形成 PRD 并开会</span>
+          </div>
+          <div class="chat-messages" id="chatMessages" aria-live="polite">
+            <article class="message message-product">
+              <span>产品经理·言澈</span>
+              <p>你好，我已经在线。你可以直接描述想做的软件，也可以先上传需求文件；我会逐步追问业务目标、用户流程、范围边界、预算和部署条件。</p>
+            </article>
+          </div>
+          <div class="prompt-chips" id="promptChips" aria-label="需求描述快捷提示">
+            <button type="button" data-prompt="我们的业务问题是：">业务问题</button>
+            <button type="button" data-prompt="核心用户和使用场景是：">用户场景</button>
+            <button type="button" data-prompt="首期必须做和明确不做的范围是：">范围边界</button>
+            <button type="button" data-prompt="目标部署环境和运维责任是：">部署运维</button>
+          </div>
+          <form class="chat-composer" id="chatForm">
+            <label class="chat-input-label" for="chatInput">把你的软件想法告诉产品经理</label>
+            <textarea
+              id="chatInput"
+              rows="4"
+              maxlength="12000"
+              placeholder="例如：我想做一个社区预约系统，居民可以选择事项和时间，工作人员可以确认或改期……"
+            ></textarea>
+            <div>
+              <label class="attach-button" for="fileInput" aria-label="上传项目资料">⌁ 上传需求文件</label>
+              <small>Enter 发送 · Shift+Enter 换行</small>
+              <button id="sendMessageButton" class="primary-button" type="submit">
+                发送给产品经理
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <aside class="understanding-panel panel">
+          <header class="panel-title">
+            <div>
+              <span class="section-index">02</span>
+              <div><p>LIVE UNDERSTANDING</p><h2>产品经理理解</h2></div>
+            </div>
+            <span class="readiness" id="readinessBadge">0%</span>
+          </header>
+          <p class="understanding-summary" id="understandingSummary">等待客户需求对话。</p>
+          <div class="understanding-block">
+            <h3>已确认目标</h3>
+            <ul id="confirmedGoals"><li>尚未确认</li></ul>
+          </div>
+          <div class="understanding-block">
+            <h3>约束与边界</h3>
+            <ul id="understoodConstraints"><li>尚未确认</li></ul>
+          </div>
+          <div class="understanding-block warning">
+            <h3>仍需澄清</h3>
+            <ul id="openQuestions"><li>请先描述业务问题</li></ul>
+          </div>
+          <button id="launchWorkshopButton" class="meeting-button" type="button" disabled>
+            <span>召集需求评审会</span>
+            <small>产品 · 架构 · 开发 · 测试 · 安全 · 运维</small>
+          </button>
+        </aside>
+      </section>
+
+      <section class="meeting-section panel" id="meetingSection">
+        <header class="section-heading compact">
+          <div>
+            <span class="section-index">03</span>
+            <div><p>REQUIREMENTS WORKSHOP</p><h2>交付总监需求澄清与避坑会议</h2></div>
+          </div>
+          <span class="status-pill" id="meetingStatus">等待产品经理准备</span>
+        </header>
+        <div class="meeting-layout">
+          <div class="meeting-room" aria-label="软件团队会议动画">
+            <div class="meeting-screen">
+              <strong id="meetingScreenTitle">CLIENT INTENT</strong>
+              <span id="meetingScreenText">会议尚未开始</span>
+            </div>
+            <div class="round-table"><span>REVIEW</span><i></i></div>
+            <div class="meeting-person person-director" data-agent-label="交付总监"><i></i><b></b><span>交付总监</span></div>
+            <div class="meeting-person person-product" data-agent-label="产品"><i></i><b></b><span>产品</span></div>
+            <div class="meeting-person person-architect" data-agent-label="架构"><i></i><b></b><span>架构</span></div>
+            <div class="meeting-person person-dev" data-agent-label="开发"><i></i><b></b><span>开发</span></div>
+            <div class="meeting-person person-qa" data-agent-label="测试"><i></i><b></b><span>测试</span></div>
+            <div class="meeting-person person-ops" data-agent-label="运维"><i></i><b></b><span>运维</span></div>
+          </div>
+          <div class="meeting-output">
+            <div class="meeting-tabs" role="tablist" aria-label="会议产物">
+              <button class="meeting-tab active" data-meeting-tab="decisions" type="button">关键决策</button>
+              <button class="meeting-tab" data-meeting-tab="risks" type="button">避坑清单</button>
+              <button class="meeting-tab" data-meeting-tab="breakdown" type="button">任务拆解</button>
+              <button class="meeting-tab" data-meeting-tab="boundaries" type="button">交付边界</button>
+            </div>
+            <div id="meetingOutput" class="meeting-document">
+              <p class="empty-state">会议开始后，这里会展示真实的服务端会议纪要。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="pipeline-section panel">
+        <header class="section-heading compact">
+          <div>
+            <span class="section-index">04</span>
+            <div><p>DELIVERY PIPELINE</p><h2>软件研发与测试流水线</h2></div>
+          </div>
+          <span id="phaseMetric">等待需求对话</span>
+        </header>
+        <div class="pipeline" id="pipeline">
+          <article data-stage="product"><span>01</span><i>产</i><strong>需求与文件</strong><small>客户 ↔ 产品经理</small></article>
+          <article data-stage="meeting"><span>02</span><i>会</i><strong>需求避坑会</strong><small>风险与拆解</small></article>
+          <article data-stage="approval"><span>03</span><i>签</i><strong>客户确认 PRD</strong><small>Human Gate</small></article>
+          <article data-stage="plan"><span>04</span><i>项</i><strong>规划与架构</strong><small>预算 / 工期 / 技术</small></article>
+          <article data-stage="development"><span>05</span><i>码</i><strong>开发与返工</strong><small>多语言项目</small></article>
+          <article data-stage="qa"><span>06</span><i>测</i><strong>测试与审查</strong><small>可追溯 QA</small></article>
+          <article data-stage="release"><span>07</span><i>验</i><strong>客户最终验收</strong><small>边界 / 代码 / 指南</small></article>
+          <article data-stage="delivery"><span>08</span><i>包</i><strong>ZIP 交付</strong><small>源码 + 全套文档</small></article>
+        </div>
+      </section>
+
+      <section class="approval-section panel" id="approvalCard" data-state="idle" aria-labelledby="approvalTitle">
+        <header>
+          <div>
+            <span class="section-index">05</span>
+            <div><p>CLIENT DECISION</p><h2 id="approvalTitle">客户决策台</h2></div>
+          </div>
+          <span class="approval-state" id="approvalState">等待工作流</span>
+        </header>
+        <p id="approvalSummary">PRD 与会议纪要完成后进行第一次确认；测试完成后进行最终交付验收。</p>
+        <details id="approvalDetails">
+          <summary>查看本次决策材料 <span id="approvalMeta">尚无材料</span></summary>
+          <div id="approvalMaterial" class="approval-material">
+            <p class="empty-state">等待产品与研发团队交付材料</p>
+          </div>
+        </details>
+        <label>
+          <span>你的决定与修改意见</span>
+          <textarea
+            id="approvalComment"
+            rows="3"
+            disabled
+            placeholder="退回时请明确需要修改的范围、风险、代码、测试或部署内容。"
+          ></textarea>
+        </label>
+        <div class="approval-actions">
+          <button id="rejectButton" class="danger-button" type="button" disabled>退回修改</button>
+          <button id="approveButton" class="primary-button" type="button" disabled>确认并继续</button>
+        </div>
+      </section>
+
+      <section class="artifacts-section panel">
+        <header class="section-heading compact">
+          <div>
+            <span class="section-index">06</span>
+            <div><p>PROJECT RECORD</p><h2>项目资料与可追溯产物</h2></div>
+          </div>
+          <span>客户资料与内部文档均进入项目级 RAG</span>
+        </header>
+        <div class="artifact-tabs" role="tablist" aria-label="项目产物">
+          <button class="artifact-tab active" data-artifact="prd" type="button" role="tab">PRD</button>
+          <button class="artifact-tab" data-artifact="workshop" type="button" role="tab">会议纪要</button>
+          <button class="artifact-tab" data-artifact="plan" type="button" role="tab">项目规划</button>
+          <button class="artifact-tab" data-artifact="architecture" type="button" role="tab">架构</button>
+          <button class="artifact-tab" data-artifact="code" type="button" role="tab">代码</button>
+          <button class="artifact-tab" data-artifact="qa" type="button" role="tab">测试报告</button>
+          <button class="artifact-tab" data-artifact="guide" type="button" role="tab">部署指南</button>
+        </div>
+        <div id="artifactPanel" class="artifact-panel">
+          <p class="empty-state">项目启动后，PRD、会议纪要、拆解、代码、测试和部署资料会逐步出现。</p>
+        </div>
+      </section>
+
+      <section class="delivery-center panel" id="deliveryCenter">
+        <div class="delivery-visual" aria-hidden="true">
+          <div class="package-box"><span>RP</span><i></i><b></b></div>
+          <div class="package-files"><i>CODE</i><i>GUIDE</i><i>TEST</i></div>
+        </div>
+        <div>
+          <p class="eyebrow">FINAL HANDOVER</p>
+          <h2>源码与客户指南 ZIP 交付中心</h2>
+          <p id="deliverySummary">
+            最终 ZIP 会包含源代码、PRD、需求会议纪要、项目规划、架构、测试报告、
+            超详细部署与使用指南以及 SHA-256 文件清单。
+          </p>
+          <div class="delivery-boundary">
+            <strong>不会伪造的边界</strong>
+            <span>未取得云账号、证书、域名、数据库和生产授权前，只交付可部署包与明确操作步骤，不声称已经上线。</span>
+          </div>
+          <a id="downloadButton" class="download-button disabled" aria-disabled="true">
+            <span>↓</span>
+            <div><strong>下载 ZIP 交付包</strong><small id="downloadMeta">等待项目完成</small></div>
+          </a>
+        </div>
+      </section>
+
+      <section class="company-live panel">
+        <header class="section-heading compact">
+          <div>
+            <span class="section-index">07</span>
+            <div><p>COMPANY LIVE</p><h2>软件公司实时动态</h2></div>
+          </div>
+          <span>直接展示服务端 trace，不编造居民台词</span>
+        </header>
+        <div class="company-live-grid">
+          <div class="agent-roster" id="agentRoster"></div>
+          <div class="activity-feed" id="activityList" aria-live="polite">
+            <article><span>系统</span><p>产品经理已在线，等待客户直接输入需求或上传文件。</p><time>NOW</time></article>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="modelCenter" class="model-center" aria-labelledby="modelCenterTitle">
+      <div class="model-center-shell">
+        <header class="model-center-header">
+          <div>
+            <p>MODEL CONTROL CENTER</p>
+            <h2 id="modelCenterTitle">多供应商模型中心</h2>
+            <span>API Key 只保存在本次后端服务进程，不进入浏览器存储、工作流状态、Trace 或 ZIP。</span>
+          </div>
+          <button id="closeModelCenter" class="dialog-close" type="button" aria-label="关闭模型中心">×</button>
+        </header>
+
+        <div class="model-center-grid">
+          <section class="provider-workbench" aria-labelledby="providerTitle">
+            <div class="model-section-title">
+              <span>01</span>
+              <div><p>BYOK PROVIDERS</p><h3 id="providerTitle">连接模型供应商</h3></div>
+            </div>
+            <form id="providerForm" class="provider-form">
+              <label>
+                <span>供应商预设</span>
+                <select id="providerPreset"></select>
+              </label>
+              <label>
+                <span>显示名称</span>
+                <input id="providerName" maxlength="80" placeholder="例如：我的 ZZSHU 网关" required />
+              </label>
+              <label class="wide">
+                <span>Base URL</span>
+                <input id="providerBaseUrl" type="url" maxlength="500" placeholder="https://zzshu.cc/v1" required />
+              </label>
+              <label class="wide">
+                <span>API Key</span>
+                <input
+                  id="providerApiKey"
+                  type="password"
+                  autocomplete="new-password"
+                  spellcheck="false"
+                  placeholder="只提交到后端进程，不会写入 localStorage"
+                  required
+                />
+              </label>
+              <label>
+                <span>模型 ID <em>可选</em></span>
+                <input id="providerManualModel" maxlength="200" placeholder="/models 不可用时填写" />
+              </label>
+              <label class="json-capability">
+                <input id="providerJsonMode" type="checkbox" checked />
+                <span>支持 JSON Object 模式</span>
+              </label>
+              <div class="provider-submit">
+                <small id="providerSafetyHint">连接时会验证域名并读取模型列表。</small>
+                <button id="connectProviderButton" class="primary-button" type="submit">测试连接并保存</button>
+              </div>
+            </form>
+
+            <div class="credential-heading">
+              <strong>已连接凭证</strong>
+              <span id="credentialCount">0 个</span>
+            </div>
+            <div id="credentialList" class="credential-list">
+              <p class="empty-state">正在读取后端凭证状态…</p>
+            </div>
+          </section>
+
+          <section class="routing-workbench" aria-labelledby="routingTitle">
+            <div class="model-section-title">
+              <span>02</span>
+              <div><p>AGENT MODEL ROUTER</p><h3 id="routingTitle">为 Agent 分配模型</h3></div>
+            </div>
+            <div class="routing-toolbar">
+              <label>
+                <span>路由预设</span>
+                <select id="routingPreset">
+                  <option value="single">单一供应商</option>
+                  <option value="balanced">均衡分配</option>
+                  <option value="cross_review">多厂商交叉审查</option>
+                  <option value="custom">高级自定义</option>
+                </select>
+              </label>
+              <label>
+                <span>默认凭证</span>
+                <select id="defaultCredential"></select>
+              </label>
+              <label>
+                <span>默认模型</span>
+                <select id="defaultModel"></select>
+              </label>
+              <button id="applyRoutingPreset" class="ghost-button" type="button">应用预设</button>
+            </div>
+
+            <div class="routing-legend">
+              <span><i class="route-live"></i> 调用 LLM</span>
+              <span><i class="route-locked"></i> RAG / Human Gate / 确定性工具不调用 LLM</span>
+            </div>
+            <div id="agentRoutingList" class="agent-routing-list"></div>
+            <div id="routingWarnings" class="routing-warnings" aria-live="polite"></div>
+            <footer class="routing-footer">
+              <p>
+                项目会话创建时冻结路由快照。开发与发布审查使用不同供应商时，可降低同源错误。
+              </p>
+              <button id="saveRoutingButton" class="primary-button" type="button">验证并使用此路由</button>
+            </footer>
+          </section>
+        </div>
+      </div>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>

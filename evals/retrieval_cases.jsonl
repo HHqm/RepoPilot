@@ -1,0 +1,5 @@
+{"case_id":"safe-divide-code","repository":"examples/buggy_calculator","query":"safe_divide 在除数为零时应该抛出 ValueError","relevant_paths":["src/calculator.py"]}
+{"case_id":"safe-divide-tests","repository":"examples/buggy_calculator","query":"哪个测试覆盖 safe_divide 的零除数异常行为","relevant_paths":["tests/test_calculator.py"]}
+{"case_id":"qdrant-version-cleanup","repository":".","query":"delete_old_document_versions document_version Qdrant filter","relevant_paths":["src/repopilot/rag/store.py"]}
+{"case_id":"pdf-docling-fallback","repository":".","query":"Docling PDF signature OCR pypdf text fallback parser","relevant_paths":["src/repopilot/rag/parsers.py"]}
+{"case_id":"rrf-reranking","repository":".","query":"dense sparse Prefetch Fusion RRF reranker candidates","relevant_paths":["src/repopilot/rag/store.py"]}

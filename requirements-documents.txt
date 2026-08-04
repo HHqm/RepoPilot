@@ -1,0 +1,6 @@
+-r requirements.txt
+# Keep NumPy 1.x for the existing sktime/scipy environment. RapidOCR otherwise
+# selects OpenCV 5, which requires NumPy 2 on supported Python versions.
+numpy>=1.24,<2
+opencv-python>=4.10,<4.12
+docling>=2.115,<3
