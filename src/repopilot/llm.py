@@ -28,21 +28,57 @@ class StructuredLLM(ABC):
     def route_metadata(self) -> dict[str, Any]:
         return {}
 
-    def close(self) -> None:
+    def close(self) -> None:  # noqa: B027 - optional hook, not abstract
         """Release provider transports when the implementation owns one."""
 
 
-class DeepSeekLLM(StructuredLLM):
-    def __init__(self, settings: Settings) -> None:
-        if not settings.deepseek_api_key:
-            raise LLMConfigurationError(
-                "DEEPSEEK_API_KEY is required when llm_mode=deepseek"
-            )
-        self.model = settings.deepseek_model
-        self.max_output_tokens = settings.llm_max_output_tokens
+_USAGE_KEYS = frozenset(
+    {
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "prompt_cache_hit_tokens",
+        "prompt_cache_miss_tokens",
+    }
+)
+_JSON_OBJECT_RULE = (
+    "\n\nReturn exactly one valid JSON object. Do not use Markdown "
+    "fences, comments, or prose outside the JSON object."
+)
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """Retry transport failures, malformed output, rate limits and 5xx."""
+
+    status_code = getattr(exc, "status_code", None)
+    return status_code is None or status_code == 429 or (
+        isinstance(status_code, int) and status_code >= 500
+    )
+
+
+class _OpenAIChatLLM(StructuredLLM):
+    """Shared transport, bounded retry and usage accounting for chat APIs.
+
+    Usage is stored thread-locally so concurrent runs sharing one adapter can
+    never read each other's token counts.
+    """
+
+    provider_label = "OpenAI-compatible"
+    max_attempts = 3
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        model: str,
+        max_output_tokens: int,
+    ) -> None:
+        self.model = model
+        self.max_output_tokens = max_output_tokens
         self.client = OpenAI(
-            api_key=settings.deepseek_api_key,
-            base_url=settings.deepseek_base_url,
+            api_key=api_key,
+            base_url=base_url,
             timeout=90.0,
             max_retries=0,
         )
@@ -54,22 +90,14 @@ class DeepSeekLLM(StructuredLLM):
 
         return dict(getattr(self._request_local, "usage", {}))
 
-    @property
-    def route_metadata(self) -> dict[str, Any]:
-        return {
-            "provider": "deepseek",
-            "model": self.model,
-            "credential_source": "environment",
-        }
-
     def close(self) -> None:
         self.client.close()
 
-    def complete_json(
-        self, *, system_prompt: str, payload: dict[str, Any], schema_name: str
-    ) -> dict[str, Any]:
-        self._request_local.usage = {}
-        messages = [
+    @staticmethod
+    def _messages(
+        system_prompt: str, payload: dict[str, Any], schema_name: str
+    ) -> list[dict[str, str]]:
+        return [
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
@@ -79,152 +107,28 @@ class DeepSeekLLM(StructuredLLM):
                 ),
             },
         ]
-        last_error: Exception | None = None
-        for attempt in range(3):
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    response_format={"type": "json_object"},
-                    max_tokens=self.max_output_tokens,
-                    extra_body={"thinking": {"type": "disabled"}},
-                )
-                content = response.choices[0].message.content
-                if not content:
-                    raise ValueError("DeepSeek returned empty JSON content")
-                if response.usage:
-                    raw_usage = response.usage.model_dump()
-                    self._request_local.usage = {
-                        key: int(value)
-                        for key, value in raw_usage.items()
-                        if key
-                        in {
-                            "prompt_tokens",
-                            "completion_tokens",
-                            "total_tokens",
-                            "prompt_cache_hit_tokens",
-                            "prompt_cache_miss_tokens",
-                        }
-                        and value is not None
-                    }
-                parsed = json.loads(content)
-                if not isinstance(parsed, dict):
-                    raise ValueError("DeepSeek JSON response must be an object")
-                return parsed
-            except Exception as exc:  # SDK exposes multiple transport error types
-                last_error = exc
-                status_code = getattr(exc, "status_code", None)
-                retryable = status_code is None or status_code == 429 or (
-                    isinstance(status_code, int) and status_code >= 500
-                )
-                if attempt < 2 and retryable:
-                    time.sleep(
-                        1.5 * (attempt + 1) + random.uniform(0.0, 0.35)
-                    )
-                    continue
-                break
-        raise RuntimeError(
-            f"DeepSeek structured request failed after retries: {type(last_error).__name__}"
-        ) from last_error
 
-
-class OpenAICompatibleLLM(StructuredLLM):
-    """Provider-neutral adapter for user-supplied OpenAI-compatible APIs."""
-
-    def __init__(self, route: dict[str, Any], settings: Settings) -> None:
-        api_key = str(route.get("api_key") or "")
-        if not api_key:
-            raise LLMConfigurationError("The selected model credential is unavailable")
-        self.provider_id = str(route["provider_id"])
-        self.provider_name = str(route["provider_name"])
-        self.credential_id = str(route["credential_id"])
-        self.model = str(route["model"])
-        self.agent_id = str(route["agent_id"])
-        self.supports_json_object = bool(route.get("supports_json_object", True))
-        self.max_output_tokens = settings.llm_max_output_tokens
-        self.client = OpenAI(
-            api_key=api_key,
-            base_url=str(route["base_url"]),
-            timeout=90.0,
-            max_retries=0,
-        )
-        self._request_local = local()
-
-    @property
-    def last_usage(self) -> dict[str, int]:
-        return dict(getattr(self._request_local, "usage", {}))
-
-    @property
-    def route_metadata(self) -> dict[str, Any]:
-        return {
-            "provider": self.provider_name,
-            "provider_id": self.provider_id,
-            "model": self.model,
-            "agent_id": self.agent_id,
-            "credential_id": self.credential_id,
-        }
-
-    def close(self) -> None:
-        self.client.close()
-
-    def complete_json(
-        self, *, system_prompt: str, payload: dict[str, Any], schema_name: str
-    ) -> dict[str, Any]:
+    def _request_json(self, request: dict[str, Any]) -> dict[str, Any]:
         self._request_local.usage = {}
-        format_rule = (
-            "\n\nReturn exactly one valid JSON object. Do not use Markdown "
-            "fences, comments, or prose outside the JSON object."
-        )
-        messages = [
-            {"role": "system", "content": system_prompt + format_rule},
-            {
-                "role": "user",
-                "content": (
-                    f"Produce JSON for schema '{schema_name}'. Input:\n"
-                    + json.dumps(payload, ensure_ascii=False)
-                ),
-            },
-        ]
         last_error: Exception | None = None
-        for attempt in range(3):
+        for attempt in range(self.max_attempts):
             try:
-                request: dict[str, Any] = {
-                    "model": self.model,
-                    "messages": messages,
-                    "max_tokens": self.max_output_tokens,
-                }
-                if self.supports_json_object:
-                    request["response_format"] = {"type": "json_object"}
                 response = self.client.chat.completions.create(**request)
                 content = response.choices[0].message.content
                 if not content:
-                    raise ValueError("Provider returned empty JSON content")
+                    raise ValueError(
+                        f"{self.provider_label} returned empty JSON content"
+                    )
                 if response.usage:
-                    raw_usage = response.usage.model_dump()
                     self._request_local.usage = {
                         key: int(value)
-                        for key, value in raw_usage.items()
-                        if key
-                        in {
-                            "prompt_tokens",
-                            "completion_tokens",
-                            "total_tokens",
-                            "prompt_cache_hit_tokens",
-                            "prompt_cache_miss_tokens",
-                        }
-                        and value is not None
+                        for key, value in response.usage.model_dump().items()
+                        if key in _USAGE_KEYS and value is not None
                     }
-                parsed = self._parse_json_object(content)
-                if not isinstance(parsed, dict):
-                    raise ValueError("Structured response must be a JSON object")
-                return parsed
-            except Exception as exc:
+                return self._parse_json_object(content)
+            except Exception as exc:  # SDK exposes multiple transport errors
                 last_error = exc
-                status_code = getattr(exc, "status_code", None)
-                retryable = status_code is None or status_code == 429 or (
-                    isinstance(status_code, int) and status_code >= 500
-                )
-                if attempt < 2 and retryable:
+                if attempt + 1 < self.max_attempts and _is_retryable(exc):
                     time.sleep(
                         1.5 * (attempt + 1) + random.uniform(0.0, 0.35)
                     )
@@ -233,7 +137,7 @@ class OpenAICompatibleLLM(StructuredLLM):
         status_code = getattr(last_error, "status_code", None)
         suffix = f" HTTP {status_code}" if status_code else ""
         raise RuntimeError(
-            "OpenAI-compatible structured request failed after retries: "
+            f"{self.provider_label} structured request failed after retries: "
             f"{type(last_error).__name__}{suffix}"
         ) from last_error
 
@@ -254,6 +158,89 @@ class OpenAICompatibleLLM(StructuredLLM):
         if not isinstance(value, dict):
             raise ValueError("Structured response must be a JSON object")
         return value
+
+
+class DeepSeekLLM(_OpenAIChatLLM):
+    provider_label = "DeepSeek"
+
+    def __init__(self, settings: Settings) -> None:
+        if not settings.deepseek_api_key:
+            raise LLMConfigurationError(
+                "DEEPSEEK_API_KEY is required when llm_mode=deepseek"
+            )
+        super().__init__(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            model=settings.deepseek_model,
+            max_output_tokens=settings.llm_max_output_tokens,
+        )
+
+    @property
+    def route_metadata(self) -> dict[str, Any]:
+        return {
+            "provider": "deepseek",
+            "model": self.model,
+            "credential_source": "environment",
+        }
+
+    def complete_json(
+        self, *, system_prompt: str, payload: dict[str, Any], schema_name: str
+    ) -> dict[str, Any]:
+        return self._request_json(
+            {
+                "model": self.model,
+                "messages": self._messages(
+                    system_prompt, payload, schema_name
+                ),
+                "response_format": {"type": "json_object"},
+                "max_tokens": self.max_output_tokens,
+                "extra_body": {"thinking": {"type": "disabled"}},
+            }
+        )
+
+
+class OpenAICompatibleLLM(_OpenAIChatLLM):
+    """Provider-neutral adapter for user-supplied OpenAI-compatible APIs."""
+
+    def __init__(self, route: dict[str, Any], settings: Settings) -> None:
+        api_key = str(route.get("api_key") or "")
+        if not api_key:
+            raise LLMConfigurationError("The selected model credential is unavailable")
+        self.provider_id = str(route["provider_id"])
+        self.provider_name = str(route["provider_name"])
+        self.credential_id = str(route["credential_id"])
+        self.agent_id = str(route["agent_id"])
+        self.supports_json_object = bool(route.get("supports_json_object", True))
+        super().__init__(
+            api_key=api_key,
+            base_url=str(route["base_url"]),
+            model=str(route["model"]),
+            max_output_tokens=settings.llm_max_output_tokens,
+        )
+
+    @property
+    def route_metadata(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider_name,
+            "provider_id": self.provider_id,
+            "model": self.model,
+            "agent_id": self.agent_id,
+            "credential_id": self.credential_id,
+        }
+
+    def complete_json(
+        self, *, system_prompt: str, payload: dict[str, Any], schema_name: str
+    ) -> dict[str, Any]:
+        request: dict[str, Any] = {
+            "model": self.model,
+            "messages": self._messages(
+                system_prompt + _JSON_OBJECT_RULE, payload, schema_name
+            ),
+            "max_tokens": self.max_output_tokens,
+        }
+        if self.supports_json_object:
+            request["response_format"] = {"type": "json_object"}
+        return self._request_json(request)
 
 
 class MockLLM(StructuredLLM):
@@ -556,7 +543,9 @@ class MockLLM(StructuredLLM):
                 "reply": (
                     "我已经把这轮信息并入需求底稿。"
                     + (
-                        f"目前还需要确认：{'；'.join(questions)}"
+                        "目前还需要确认："
+                        + "；".join(item.rstrip("。？?") for item in questions)
+                        + "。"
                         if questions
                         else "核心目标、约束和交付预期已经足够清楚，可以提交跨职能需求评审会。"
                     )

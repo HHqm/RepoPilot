@@ -7,9 +7,10 @@ import re
 import tempfile
 import time
 import zipfile
+from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from langgraph.errors import GraphInterrupt
 from langgraph.types import interrupt
@@ -37,7 +38,8 @@ from .prompts import (
     REQUIREMENTS_WORKSHOP_SYSTEM,
     STUDIO_REVIEWER_SYSTEM,
 )
-from .repo_tools import artifact_digest, content_sha256, unified_diff
+from .repo_tools import artifact_digest, content_sha256
+from .run_metrics import render_run_metrics, summarize_run_metrics
 from .security import resolve_safe_path, scan_content
 from .state import RepoPilotState
 
@@ -854,29 +856,42 @@ class SoftwareStudioAgentSuite:
                 "artifact_digest": artifact_digest(approval_material),
             }
         )
-        if isinstance(decision, bool):
-            approved, comment = decision, ""
+        approved, comment, terminate = self._decision_fields(decision)
+        if approved:
+            status = "planning_project"
+            summary = "Client confirmed the PRD; engineering may start."
+        elif terminate:
+            status = "cancelled"
+            summary = "Client ended the project at PRD review."
         else:
-            approved = bool(decision.get("approved", False))
-            comment = str(decision.get("comment", ""))
+            status = "revising_requirements"
+            summary = (
+                "Client requested a PRD revision; no engineering work started."
+            )
         return {
             "requirements_approved": approved,
             "requirements_approval_comment": comment,
             "requirements_feedback": "" if approved else comment,
-            "status": "planning_project" if approved else "revising_requirements",
+            "status": status,
             "traces": [
                 self._trace(
                     "RequirementsApprovalAgent",
                     started,
-                    (
-                        "Client confirmed the PRD; engineering may start."
-                        if approved
-                        else "Client requested a PRD revision; no engineering work started."
-                    ),
-                    metadata={"approved": approved},
+                    summary,
+                    metadata={"approved": approved, "terminate": terminate},
                 )
             ],
         }
+
+    @staticmethod
+    def _decision_fields(decision: Any) -> tuple[bool, str, bool]:
+        if isinstance(decision, bool):
+            return decision, "", False
+        return (
+            bool(decision.get("approved", False)),
+            str(decision.get("comment", "")),
+            bool(decision.get("terminate", False)),
+        )
 
     def requirements_workshop_agent(
         self,
@@ -1081,11 +1096,17 @@ class SoftwareStudioAgentSuite:
         revision = int(state.get("development_revision", 0)) + 1
         current = GeneratedProject.model_validate(state["generated_project"])
         qa_report = QualityAssuranceReport.model_validate(state["qa_report"])
-        failed_cases = [
-            item.model_dump()
-            for item in qa_report.test_cases
-            if item.status in {"failed", "blocked"}
-        ]
+        feedback_source, change_requests = self._revision_feedback(state)
+        if feedback_source == "qa":
+            defects = list(qa_report.defects)
+            failed_cases = [
+                item.model_dump()
+                for item in qa_report.test_cases
+                if item.status in {"failed", "blocked"}
+            ]
+        else:
+            # QA already passed; the new input is the reviewer's or client's.
+            defects, failed_cases = change_requests, []
         data, context = self._complete(
             state,
             prompt=PROJECT_REVISION_SYSTEM,
@@ -1097,7 +1118,8 @@ class SoftwareStudioAgentSuite:
                 "architecture": state["architecture"],
                 "current_project": current.model_dump(),
                 "current_deployment_guide": state.get("deployment_guide", {}),
-                "qa_defects": qa_report.defects,
+                "feedback_source": feedback_source,
+                "qa_defects": defects,
                 "failed_or_blocked_cases": failed_cases,
                 "development_revision": revision,
                 "policy_constraints": state.get("policy_constraints", []),
@@ -1147,6 +1169,7 @@ class SoftwareStudioAgentSuite:
                 f"开发返工记录 {revision}",
                 {
                     "summary": patch.summary,
+                    "feedback_source": feedback_source,
                     "changed_files": changed_paths,
                     "deleted_files": deleted_paths,
                     "addressed_defects": patch.addressed_defects,
@@ -1167,6 +1190,7 @@ class SoftwareStudioAgentSuite:
                         f"{len(deleted_paths)} deleted files."
                     ),
                     metadata={
+                        "feedback_source": feedback_source,
                         "changed_paths": changed_paths,
                         "deleted_paths": deleted_paths,
                         "addressed_defects": patch.addressed_defects,
@@ -1175,6 +1199,31 @@ class SoftwareStudioAgentSuite:
                 )
             ],
         }
+
+    @staticmethod
+    def _revision_feedback(state: RepoPilotState) -> tuple[str, list[str]]:
+        """Name what sent the project back and turn it into actionable items.
+
+        The routing status, not leftover fields, decides the source: a client
+        comment from an earlier round must not leak into a later QA rework.
+        """
+
+        status = state.get("status")
+        if status == "release_changes_requested":
+            comment = str(state.get("release_approval_comment", "")).strip()
+            return "client_change_request", [f"客户修改要求：{comment}"]
+        if status == "release_rejected":
+            review = state.get("release_review") or {}
+            findings = [
+                f"[{item.get('severity', 'medium')}] "
+                + (f"{item['path']}: " if item.get("path") else "")
+                + str(item.get("message", ""))
+                for item in review.get("findings", [])
+            ]
+            return "release_review", findings or [
+                str(review.get("summary") or "发布审查未通过")
+            ]
+        return "qa", []
 
     def deployment_agent(self, state: RepoPilotState) -> dict[str, Any]:
         started = time.perf_counter()
@@ -1385,25 +1434,28 @@ class SoftwareStudioAgentSuite:
                 "artifact_digest": artifact_digest(approval_material),
             }
         )
-        if isinstance(decision, bool):
-            approved, comment = decision, ""
+        approved, comment, terminate = self._decision_fields(decision)
+        if approved:
+            status = "writing_project"
+            summary = "Client approved the reviewed project package."
+        elif comment.strip() and not terminate:
+            status = "release_changes_requested"
+            summary = (
+                "Client requested changes; no project files were written."
+            )
         else:
-            approved = bool(decision.get("approved", False))
-            comment = str(decision.get("comment", ""))
+            status = "release_rejected"
+            summary = "Client rejected the release; no project files were written."
         return {
             "release_approved": approved,
             "release_approval_comment": comment,
-            "status": "writing_project" if approved else "release_rejected",
+            "status": status,
             "traces": [
                 self._trace(
                     "ReleaseApprovalAgent",
                     started,
-                    (
-                        "Client approved the reviewed project package."
-                        if approved
-                        else "Client rejected the release; no project files were written."
-                    ),
-                    metadata={"approved": approved},
+                    summary,
+                    metadata={"approved": approved, "terminate": terminate},
                 )
             ],
         }
@@ -1494,12 +1546,17 @@ class SoftwareStudioAgentSuite:
             final_status = "completed"
         elif status == "qa_failed":
             final_status = "delivery_failed"
-        elif status in {"release_rejected", "delivery_failed"}:
-            final_status = status
+        elif status == "release_changes_requested":
+            # Revision budget exhausted: the client's last word is a rejection.
+            final_status = "release_rejected"
+        elif status == "revising_requirements":
+            # PRD rejected after the last allowed revision.
+            final_status = "cancelled"
         else:
             final_status = status
         architecture = state.get("architecture", {})
         guide = state.get("deployment_guide", {})
+        metrics = summarize_run_metrics(state.get("traces", []))
         report = "\n".join(
             [
                 f"# {state.get('project_name', 'Software Project')} 交付报告",
@@ -1516,6 +1573,12 @@ class SoftwareStudioAgentSuite:
                 f"- PRD：{'已确认' if state.get('requirements_approved') else '未确认'}",
                 f"- 发布：{'已批准' if state.get('release_approved') else '未批准'}",
                 "",
+                f"- 开发返工：{state.get('development_revision', 0)} 轮",
+                "",
+                "## 成本与耗时",
+                "",
+                render_run_metrics(metrics),
+                "",
                 "## 下一步",
                 "",
                 "- 阅读输出目录中的 `README.md` 与 `DEPLOYMENT.md`。",
@@ -1525,6 +1588,7 @@ class SoftwareStudioAgentSuite:
         )
         return {
             "report": report,
+            "run_metrics": metrics,
             "status": final_status,
             "traces": [
                 self._trace(

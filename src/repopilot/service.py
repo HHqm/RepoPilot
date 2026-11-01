@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import copy
 import json
 import re
@@ -21,6 +22,7 @@ from langgraph.types import Command
 from .agents import AgentSuite
 from .collaboration import ProjectCollaborationManager
 from .config import Settings
+from .model_routing import ModelProviderRegistry
 from .models import (
     ApprovalDecision,
     IssueRequest,
@@ -29,10 +31,9 @@ from .models import (
     ProjectSessionView,
     RunCreated,
 )
-from .model_routing import ModelProviderRegistry
+from .state import STATE_SCHEMA_VERSION
 from .studio_agents import SoftwareStudioAgentSuite
 from .studio_workflow import build_studio_workflow
-from .state import STATE_SCHEMA_VERSION
 from .workflow import build_workflow
 
 
@@ -60,6 +61,7 @@ class RunRuntime:
     state: dict[str, Any]
     interrupt: dict[str, Any] | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
+    last_sequence: int = 0
     closed: bool = False
     condition: Condition = field(default_factory=Condition)
     operation_lock: Lock = field(default_factory=Lock)
@@ -71,7 +73,9 @@ class RepoPilotService:
 
     Each graph execution owns its SQLite connection. WAL mode and busy_timeout
     protect concurrent readers/writers without sharing one connection across
-    FastAPI worker threads.
+    FastAPI worker threads. The append-only event log is the exception: it
+    uses one long-lived, lock-guarded connection because every agent trace is
+    a tiny write and reconnecting per event dominated publish latency.
     """
 
     def __init__(self, settings: Settings | None = None):
@@ -92,17 +96,28 @@ class RepoPilotService:
             thread_name_prefix="repopilot-run",
         )
         self._run_slots = BoundedSemaphore(self.settings.max_pending_runs)
+        # Compiled graphs are immutable templates; each session copies one and
+        # binds its own checkpointer, which is ~80x cheaper than recompiling.
+        # Templates are built lazily so agent overrides made before the first
+        # run are still honoured.
+        self._graph_templates: dict[str, Any] = {}
+        self._graph_templates_lock = Lock()
         self._closed = False
         self._setup_database()
+        self._event_db = self._connect()
+        self._event_db.execute("PRAGMA synchronous=NORMAL")
+        self._event_db_lock = Lock()
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         self._executor.shutdown(wait=True, cancel_futures=False)
+        with self._event_db_lock:
+            self._event_db.close()
         self.suite.close()
 
-    def __enter__(self) -> "RepoPilotService":
+    def __enter__(self) -> RepoPilotService:
         return self
 
     def __exit__(self, exc_type, exc, traceback) -> None:
@@ -127,12 +142,7 @@ class RepoPilotService:
                     "Repository is outside REPOPILOT_WORKSPACE_ROOTS"
                 )
         run_id = uuid.uuid4().hex
-        routing = self._validated_routing(request.model_routing)
-        mode = "routed" if routing else (
-            request.llm_mode or self.settings.llm_mode
-        )
-        if mode == "routed" and not routing:
-            raise ValueError("llm_mode=routed requires model_routing")
+        mode, routing = self._resolve_llm_mode(request)
         initial: dict[str, Any] = {
             "state_schema_version": STATE_SCHEMA_VERSION,
             "run_id": run_id,
@@ -146,24 +156,10 @@ class RepoPilotService:
             "approved": False,
             "traces": [],
         }
-        runtime = RunRuntime(run_id=run_id, status="queued", state=initial)
-        with self._runtimes_lock:
-            self._runtimes[run_id] = runtime
-        self._publish(
-            runtime,
-            "run_status",
-            {
-                "status": "queued",
-                "summary": "Run accepted and queued for background execution.",
-            },
+        return self._launch_runtime(
+            initial,
+            "Run accepted and queued for background execution.",
         )
-        try:
-            runtime.future = self._submit_graph(runtime, initial, False)
-        except Exception:
-            with self._runtimes_lock:
-                self._runtimes.pop(run_id, None)
-            raise
-        return self._runtime_response(runtime)
 
     def start_project(
         self, request: ProjectRequest | ProjectLaunchRequest
@@ -172,12 +168,7 @@ class RepoPilotService:
 
         self._ensure_open()
         run_id = uuid.uuid4().hex
-        routing = self._validated_routing(request.model_routing)
-        mode = "routed" if routing else (
-            request.llm_mode or self.settings.llm_mode
-        )
-        if mode == "routed" and not routing:
-            raise ValueError("llm_mode=routed requires model_routing")
+        mode, routing = self._resolve_llm_mode(request)
         collaboration_id = (
             request.collaboration_id
             if isinstance(request, ProjectLaunchRequest)
@@ -244,18 +235,22 @@ class RepoPilotService:
             "status": "queued",
             "traces": [],
         }
+        return self._launch_runtime(
+            initial,
+            "Client brief accepted; the software company workflow is queued.",
+        )
+
+    def _launch_runtime(
+        self, initial: dict[str, Any], summary: str
+    ) -> RunCreated:
+        run_id = initial["run_id"]
         runtime = RunRuntime(run_id=run_id, status="queued", state=initial)
         with self._runtimes_lock:
             self._runtimes[run_id] = runtime
         self._publish(
             runtime,
             "run_status",
-            {
-                "status": "queued",
-                "summary": (
-                    "Client brief accepted; the software company workflow is queued."
-                ),
-            },
+            {"status": "queued", "summary": summary},
         )
         try:
             runtime.future = self._submit_graph(runtime, initial, False)
@@ -264,6 +259,15 @@ class RepoPilotService:
                 self._runtimes.pop(run_id, None)
             raise
         return self._runtime_response(runtime)
+
+    def _resolve_llm_mode(self, request) -> tuple[str, dict[str, Any] | None]:
+        routing = self._validated_routing(request.model_routing)
+        mode = "routed" if routing else (
+            request.llm_mode or self.settings.llm_mode
+        )
+        if mode == "routed" and not routing:
+            raise ValueError("llm_mode=routed requires model_routing")
+        return mode, routing
 
     def launch_collaboration(
         self,
@@ -426,18 +430,10 @@ class RepoPilotService:
         cursor = max(0, after_sequence)
         while True:
             with runtime.condition:
-                pending = [
-                    copy.deepcopy(event)
-                    for event in runtime.events
-                    if event["sequence"] > cursor
-                ]
+                pending = self._events_after(runtime, cursor)
                 if not pending and not runtime.closed:
                     runtime.condition.wait(timeout=heartbeat_seconds)
-                    pending = [
-                        copy.deepcopy(event)
-                        for event in runtime.events
-                        if event["sequence"] > cursor
-                    ]
+                    pending = self._events_after(runtime, cursor)
                 closed = runtime.closed
             if pending:
                 for event in pending:
@@ -447,6 +443,19 @@ class RepoPilotService:
             if closed:
                 return
             yield None
+
+    @staticmethod
+    def _events_after(
+        runtime: RunRuntime, cursor: int
+    ) -> list[dict[str, Any]]:
+        # Events are appended in strictly increasing sequence order, so a
+        # reconnecting SSE client only pays for the tail it has not seen.
+        start = bisect.bisect_right(
+            runtime.events,
+            cursor,
+            key=lambda event: event["sequence"],
+        )
+        return [copy.deepcopy(event) for event in runtime.events[start:]]
 
     def _run_graph(
         self,
@@ -479,8 +488,16 @@ class RepoPilotService:
                             stream_mode="updates",
                         ):
                             self._consume_chunk(runtime, chunk)
-                        response = self._response_from_graph(
-                            graph, runtime.run_id
+                        snapshot = graph.get_state(self._config(runtime.run_id))
+                        response = self._response_from_snapshot(
+                            runtime.run_id, snapshot
+                        )
+                    if not snapshot.next and response.status not in TERMINAL_STATUSES:
+                        # A finished graph must end in a terminal status, or SSE
+                        # streams and waiters would block on it forever.
+                        raise RuntimeError(
+                            "Workflow ended with non-terminal status "
+                            f"{response.status!r}"
                         )
                     self._replace_runtime_state(runtime, response)
                     self._publish(
@@ -666,16 +683,7 @@ class RepoPilotService:
     ) -> dict[str, Any]:
         with runtime.condition:
             occurred_at = datetime.now(UTC).isoformat()
-            next_memory_sequence = (
-                max(
-                    (
-                        int(item.get("sequence", 0))
-                        for item in runtime.events
-                    ),
-                    default=0,
-                )
-                + 1
-            )
+            next_memory_sequence = runtime.last_sequence + 1
             try:
                 sequence = self._append_durable_event(
                     runtime.run_id,
@@ -693,6 +701,7 @@ class RepoPilotService:
                 "data": copy.deepcopy(data),
             }
             runtime.events.append(event)
+            runtime.last_sequence = sequence
             runtime.condition.notify_all()
             return copy.deepcopy(event)
 
@@ -747,6 +756,7 @@ class RepoPilotService:
                     },
                 }
             )
+        runtime.last_sequence = runtime.events[-1]["sequence"]
         with self._runtimes_lock:
             return self._runtimes.setdefault(response.run_id, runtime)
 
@@ -775,10 +785,6 @@ class RepoPilotService:
             snapshot = graph.get_state(self._config(run_id))
             response = self._response_from_snapshot(run_id, snapshot)
             return response, tuple(snapshot.next or ())
-
-    def _response_from_graph(self, graph, run_id: str) -> RunCreated:
-        snapshot = graph.get_state(self._config(run_id))
-        return self._response_from_snapshot(run_id, snapshot)
 
     @staticmethod
     def _response_from_snapshot(run_id: str, snapshot) -> RunCreated:
@@ -859,41 +865,42 @@ class RepoPilotService:
         *,
         minimum_sequence: int = 1,
     ) -> int:
-        connection = self._connect()
-        try:
+        with self._event_db_lock:
+            connection = self._event_db
             connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                """
-                SELECT COALESCE(MAX(sequence), 0) + 1
-                FROM run_events
-                WHERE run_id = ?
-                """,
-                (run_id,),
-            ).fetchone()
-            sequence = max(int(row[0]), minimum_sequence)
-            connection.execute(
-                """
-                INSERT INTO run_events
-                    (run_id, sequence, event_type, occurred_at, data_json)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    run_id,
-                    sequence,
-                    event_type,
-                    occurred_at,
-                    json.dumps(data, ensure_ascii=False),
-                ),
-            )
+            try:
+                row = connection.execute(
+                    """
+                    SELECT COALESCE(MAX(sequence), 0) + 1
+                    FROM run_events
+                    WHERE run_id = ?
+                    """,
+                    (run_id,),
+                ).fetchone()
+                sequence = max(int(row[0]), minimum_sequence)
+                connection.execute(
+                    """
+                    INSERT INTO run_events
+                        (run_id, sequence, event_type, occurred_at, data_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        sequence,
+                        event_type,
+                        occurred_at,
+                        json.dumps(data, ensure_ascii=False),
+                    ),
+                )
+            except BaseException:
+                connection.rollback()
+                raise
             connection.commit()
             return sequence
-        finally:
-            connection.close()
 
     def _load_durable_events(self, run_id: str) -> list[dict[str, Any]]:
-        connection = self._connect()
-        try:
-            rows = connection.execute(
+        with self._event_db_lock:
+            rows = self._event_db.execute(
                 """
                 SELECT sequence, event_type, occurred_at, data_json
                 FROM run_events
@@ -902,8 +909,6 @@ class RepoPilotService:
                 """,
                 (run_id,),
             ).fetchall()
-        finally:
-            connection.close()
         result = []
         for sequence, event_type, occurred_at, data_json in rows:
             try:
@@ -922,15 +927,28 @@ class RepoPilotService:
 
     @contextmanager
     def _graph_session(self, workflow_kind: str = "maintenance"):
+        template = self._graph_template(workflow_kind)
         connection = self._connect()
         try:
-            saver = SqliteSaver(connection)
-            if workflow_kind == "project_factory":
-                yield build_studio_workflow(self.studio_suite, saver)
-            else:
-                yield build_workflow(self.suite, saver)
+            yield template.copy({"checkpointer": SqliteSaver(connection)})
         finally:
             connection.close()
+
+    def _graph_template(self, workflow_kind: str):
+        kind = (
+            "project_factory"
+            if workflow_kind == "project_factory"
+            else "maintenance"
+        )
+        with self._graph_templates_lock:
+            template = self._graph_templates.get(kind)
+            if template is None:
+                if kind == "project_factory":
+                    template = build_studio_workflow(self.studio_suite, None)
+                else:
+                    template = build_workflow(self.suite, None)
+                self._graph_templates[kind] = template
+            return template
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(

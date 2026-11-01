@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import sys
 import tempfile
 from pathlib import Path
 
@@ -47,29 +46,40 @@ def main() -> int:
                 run = service.wait(accepted.run_id, timeout_seconds=30)
                 retrieval_hit = any(
                     item["path"] == case["expected_retrieval_path"]
-                    for item in run.state["evidence"]
+                    for item in run.state.get("evidence", [])
                 )
-                resumed = service.decide(
-                    run.run_id,
-                    ApprovalDecision(
-                        approved=True,
-                        comment="Automated eval fixture",
-                        artifact_digest=run.interrupt["artifact_digest"],
-                    ),
-                )
-                completed = service.wait(
-                    resumed.run_id,
-                    statuses={"completed", "failed", "failed_rolled_back"},
-                    timeout_seconds=30,
-                )
+                approvals = 0
+                # A repair attempt produces a new patch that needs a new
+                # human approval; the eval approves each one it is shown.
+                while run.status == "awaiting_approval":
+                    approvals += 1
+                    service.decide(
+                        run.run_id,
+                        ApprovalDecision(
+                            approved=True,
+                            comment="Automated eval fixture",
+                            artifact_digest=run.interrupt["artifact_digest"],
+                        ),
+                    )
+                    run = service.wait(run.run_id, timeout_seconds=60)
+                completed = run
             results.append(
                 {
                     "case_id": case["case_id"],
                     "retrieval_hit_at_k": retrieval_hit,
-                    "proposal_generated": bool(run.state["proposals"]),
-                    "review_passed": run.state["review"]["approved"],
-                    "test_passed": completed.state["test_result"]["success"],
+                    "proposal_generated": bool(completed.state.get("proposals")),
+                    "review_passed": bool(
+                        completed.state.get("review", {}).get("approved")
+                    ),
+                    "test_passed": bool(
+                        completed.state.get("test_result", {}).get("success")
+                    ),
                     "task_completed": completed.status == "completed",
+                    "human_approvals": approvals,
+                    "repair_attempts": completed.state.get("repair_attempt", 0),
+                    "llm_calls": completed.state.get("run_metrics", {}).get(
+                        "llm_calls", 0
+                    ),
                 }
             )
     summary = {

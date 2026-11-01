@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 import weakref
+from collections.abc import Iterable
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from threading import RLock
-from typing import Any, Iterable
+from typing import Any
 
 from ..config import Settings
 from ..models import Evidence
 from .chunking import StructureAwareChunker
+from .embedding_cache import CachedHybridEmbedding, EmbeddingCache
 from .embeddings import (
     BgeCrossEncoderReranker,
     BgeM3HybridEmbedding,
@@ -20,14 +24,20 @@ from .embeddings import (
 from .parsers import (
     ALLOWED_SUFFIXES,
     CODE_SUFFIXES,
+    RICH_DOCUMENT_SUFFIXES,
     DocumentLoader,
     DocumentParsingError,
-    RICH_DOCUMENT_SUFFIXES,
     generic_code_symbols,
     redact_document_secrets,
 )
 from .store import QdrantVectorStore
-from .types import IndexedFile, IndexedRepository, RAG_SCHEMA_VERSION
+from .types import (
+    RAG_SCHEMA_VERSION,
+    IndexedFile,
+    IndexedRepository,
+    RetrievalStats,
+    SearchOptions,
+)
 
 
 IGNORED_DIRS = {
@@ -77,9 +87,12 @@ class HybridRAG:
             weakref.WeakValueDictionary()
         )
         self._embedding_lock = RLock()
+        # Repositories whose manifest has been reconciled with the vector
+        # store since this process started (see _index_locked).
+        self._verified_repositories: set[str] = set()
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> "HybridRAG":
+    def from_settings(cls, settings: Settings) -> HybridRAG:
         if settings.rag_embedding_provider == "deterministic":
             embedding = DeterministicHybridEmbedding()
         elif settings.rag_embedding_provider == "bge-m3":
@@ -91,6 +104,15 @@ class HybridRAG:
                 if settings.rag_model_cache
                 else None,
             )
+            if settings.rag_embedding_cache_entries > 0:
+                # The deterministic test provider is cheaper than a cache read.
+                embedding = CachedHybridEmbedding(
+                    embedding,
+                    EmbeddingCache(
+                        settings.runtime_dir / "rag" / "embedding_cache.sqlite3",
+                        max_entries=settings.rag_embedding_cache_entries,
+                    ),
+                )
         else:
             raise ValueError(
                 "REPOPILOT_RAG_EMBEDDING_PROVIDER must be "
@@ -157,14 +179,15 @@ class HybridRAG:
     def _index_locked(self, root: Path, repo_id: str) -> IndexedRepository:
         manifest_path = self._manifest_dir / f"{repo_id}.json"
         previous = self._read_manifest(manifest_path)
+        rebuilt = False
         if (
             previous.get("schema_version") != RAG_SCHEMA_VERSION
             or previous.get("collection_name") != self.store.collection_name
-            or self.store.collection_was_created
+            or not self._manifest_matches_store(repo_id, previous)
         ):
+            rebuilt = bool(previous)
             previous = {}
             self.store.delete_repository(repo_id)
-        self.store.collection_was_created = False
         previous_files = dict(previous.get("files") or {})
 
         def invalidate_previous(relative_path: str) -> None:
@@ -191,6 +214,7 @@ class HybridRAG:
         changed_chunks = []
         changed_versions: list[tuple[str, str]] = []
         reused_files = 0
+        stat_reused_files = 0
         seen_paths: set[str] = set()
         for path in candidates:
             relative = path.relative_to(root).as_posix()
@@ -200,14 +224,28 @@ class HybridRAG:
                 if path.suffix.lower() in RICH_DOCUMENT_SUFFIXES
                 else self.settings.max_file_bytes
             )
+            previous_file = previous_files.get(relative)
             try:
-                size = path.stat().st_size
-                if size > file_limit:
+                stat = path.stat()
+                if stat.st_size > file_limit:
                     skipped_files[relative] = (
                         f"file exceeds {file_limit} bytes"
                     )
                     invalidate_previous(relative)
                     continue
+                if (
+                    previous_file
+                    and int(previous_file.get("mtime_ns", 0)) != 0
+                    and int(previous_file["mtime_ns"]) == stat.st_mtime_ns
+                    and int(previous_file.get("size", -1)) == stat.st_size
+                ):
+                    # Same size and a trusted, unchanged mtime: skip reading
+                    # and hashing, like git's stat-based index check.
+                    files[relative] = IndexedFile.from_manifest(previous_file)
+                    reused_files += 1
+                    stat_reused_files += 1
+                    continue
+                mtime_ns = self._trusted_mtime_ns(stat.st_mtime_ns)
                 raw = path.read_bytes()
             except OSError as exc:
                 skipped_files[relative] = f"read failed: {exc}"
@@ -220,10 +258,11 @@ class HybridRAG:
                 invalidate_previous(relative)
                 continue
             digest = sha256(raw).hexdigest()
-            previous_file = previous_files.get(relative)
             if previous_file and previous_file.get("sha256") == digest:
-                indexed_file = IndexedFile.from_manifest(previous_file)
-                files[relative] = indexed_file
+                files[relative] = replace(
+                    IndexedFile.from_manifest(previous_file),
+                    mtime_ns=mtime_ns,
+                )
                 reused_files += 1
                 continue
 
@@ -255,6 +294,7 @@ class HybridRAG:
                 parser=parsed.parser,
                 symbols=symbols,
                 redaction_count=redaction_count,
+                mtime_ns=mtime_ns,
             )
             chunks = self.chunker.chunk(
                 repo_id=repo_id,
@@ -313,6 +353,7 @@ class HybridRAG:
             },
         }
         self._write_manifest(manifest_path, manifest)
+        self._verified_repositories.add(repo_id)
         return IndexedRepository(
             root=root,
             repo_id=repo_id,
@@ -323,7 +364,42 @@ class HybridRAG:
             reused_files=reused_files,
             deleted_files=len(deleted_paths),
             skipped_files=skipped_files,
+            stat_reused_files=stat_reused_files,
+            rebuilt=rebuilt,
         )
+
+    # A file modified within this window of being hashed may change again
+    # without moving its mtime (coarse filesystem timestamps), so its stat is
+    # not trusted for the next run. Mirrors git's "racy clean" handling.
+    RACY_MTIME_WINDOW_NS = 2_000_000_000
+
+    @classmethod
+    def _trusted_mtime_ns(cls, mtime_ns: int) -> int:
+        return (
+            mtime_ns
+            if mtime_ns < time.time_ns() - cls.RACY_MTIME_WINDOW_NS
+            else 0
+        )
+
+    def _manifest_matches_store(
+        self, repo_id: str, manifest: dict[str, Any]
+    ) -> bool:
+        """Reconcile a manifest with Qdrant once per repository per process.
+
+        A manifest can outlive its vectors (collection recreated, storage
+        restored from an older backup, crash between upsert and manifest
+        write). Trusting it would silently return empty search results, so
+        the first index in each process compares chunk counts and rebuilds
+        the repository on any mismatch.
+        """
+
+        if not manifest or repo_id in self._verified_repositories:
+            return True
+        expected = sum(
+            int(item.get("chunk_count", 0))
+            for item in (manifest.get("files") or {}).values()
+        )
+        return self.store.count_repository(repo_id) == expected
 
     def search(
         self,
@@ -332,15 +408,35 @@ class HybridRAG:
         *,
         top_k: int,
         source_types: list[str] | None = None,
+        options: SearchOptions | None = None,
     ) -> list[Evidence]:
+        evidence, _ = self.search_with_stats(
+            index,
+            query,
+            top_k=top_k,
+            source_types=source_types,
+            options=options,
+        )
+        return evidence
+
+    def search_with_stats(
+        self,
+        index: IndexedRepository,
+        query: str,
+        *,
+        top_k: int,
+        source_types: list[str] | None = None,
+        options: SearchOptions | None = None,
+    ) -> tuple[list[Evidence], RetrievalStats]:
         if not query.strip():
             raise ValueError("RAG query must not be blank")
         with self._embedding_lock:
-            ranked = self.store.search(
+            ranked, stats = self.store.search(
                 repo_id=index.repo_id,
                 query=query,
                 top_k=max(1, top_k),
                 source_types=source_types,
+                options=options,
             )
         evidence = []
         for rank, (candidate, rerank_score) in enumerate(ranked, start=1):
@@ -377,7 +473,7 @@ class HybridRAG:
                     score=round(rerank_score, 6),
                 )
             )
-        return evidence
+        return evidence, stats
 
     def close(self) -> None:
         self.store.close()
@@ -406,26 +502,38 @@ class HybridRAG:
         temporary.replace(path)
 
     @staticmethod
-    def _candidate_files(root: Path) -> Iterable[Path]:
-        for path in root.rglob("*"):
-            if not path.is_file():
-                continue
-            try:
-                resolved = path.resolve()
-                resolved.relative_to(root)
-            except (OSError, ValueError):
-                continue
-            relative_parts = path.relative_to(root).parts
-            if any(
-                part.casefold() in IGNORED_DIRS
-                or part.casefold().startswith(".repopilot")
-                for part in relative_parts
-            ):
-                continue
-            lowered = path.name.lower()
-            if lowered in SENSITIVE_NAMES or lowered.startswith(".env."):
-                continue
-            if path.suffix.lower() in ALLOWED_SUFFIXES:
+    def _is_ignored_name(name: str) -> bool:
+        folded = name.casefold()
+        return folded in IGNORED_DIRS or folded.startswith(".repopilot")
+
+    @classmethod
+    def _candidate_files(cls, root: Path) -> Iterable[Path]:
+        # Prune ignored directories while walking. ``rglob`` would descend
+        # into node_modules/.git/.venv first and only then discard their
+        # files, which dominates indexing time on real repositories. Symlinked
+        # directories are not followed, so aliases cannot double-index files.
+        for directory, dirnames, filenames in os.walk(root):
+            dirnames[:] = [
+                name for name in dirnames if not cls._is_ignored_name(name)
+            ]
+            parent = Path(directory)
+            for filename in filenames:
+                lowered = filename.lower()
+                if (
+                    cls._is_ignored_name(filename)
+                    or lowered in SENSITIVE_NAMES
+                    or lowered.startswith(".env.")
+                ):
+                    continue
+                path = parent / filename
+                if path.suffix.lower() not in ALLOWED_SUFFIXES:
+                    continue
+                try:
+                    if not path.is_file():
+                        continue
+                    path.resolve().relative_to(root)
+                except (OSError, ValueError):
+                    continue
                 yield path
 
     @staticmethod

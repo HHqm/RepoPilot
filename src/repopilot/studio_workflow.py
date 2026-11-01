@@ -8,8 +8,18 @@ from .state import RepoPilotState
 from .studio_agents import SoftwareStudioAgentSuite
 
 
+# Every source of release feedback (QA defects, release-review findings and a
+# client's change request) shares one revision budget, so a project cannot
+# loop between development and review indefinitely.
+MAX_DEVELOPMENT_REVISIONS = 2
+
+
 def _has_error(state: RepoPilotState) -> bool:
     return bool(state.get("error"))
+
+
+def _revision_budget_left(state: RepoPilotState) -> bool:
+    return int(state.get("development_revision", 0)) < MAX_DEVELOPMENT_REVISIONS
 
 
 def _continue_or_failure(state: RepoPilotState) -> str:
@@ -21,6 +31,8 @@ def _after_requirements_approval(state: RepoPilotState) -> str:
         return "failure"
     if state.get("requirements_approved"):
         return "plan"
+    if state.get("status") == "cancelled":
+        return "report"
     if int(state.get("requirements_revision", 0)) >= 3:
         return "report"
     return "revise"
@@ -29,7 +41,9 @@ def _after_requirements_approval(state: RepoPilotState) -> str:
 def _after_release_review(state: RepoPilotState) -> str:
     if _has_error(state):
         return "failure"
-    return "approval" if state["release_review"]["approved"] else "report"
+    if state["release_review"]["approved"]:
+        return "approval"
+    return "revise" if _revision_budget_left(state) else "report"
 
 
 def _after_qa(state: RepoPilotState) -> str:
@@ -37,15 +51,21 @@ def _after_qa(state: RepoPilotState) -> str:
         return "failure"
     if state["qa_report"]["passed"]:
         return "review"
-    if int(state.get("development_revision", 0)) < 2:
-        return "revise"
-    return "report"
+    return "revise" if _revision_budget_left(state) else "report"
 
 
 def _after_release_approval(state: RepoPilotState) -> str:
     if _has_error(state):
         return "failure"
-    return "write" if state.get("release_approved") else "report"
+    if state.get("release_approved"):
+        return "write"
+    # A rejection that explains what to change is a change request; one
+    # without a reason (or with no budget left) closes the project.
+    if state.get("status") == "release_changes_requested" and (
+        _revision_budget_left(state)
+    ):
+        return "revise"
+    return "report"
 
 
 def _after_report(state: RepoPilotState) -> str:
@@ -167,6 +187,7 @@ def build_studio_workflow(suite: SoftwareStudioAgentSuite, checkpointer):
         _after_release_review,
         {
             "approval": "release_approval",
+            "revise": "developer_revision",
             "report": "report",
             "failure": "failure",
         },
@@ -176,6 +197,7 @@ def build_studio_workflow(suite: SoftwareStudioAgentSuite, checkpointer):
         _after_release_approval,
         {
             "write": "write_project",
+            "revise": "developer_revision",
             "report": "report",
             "failure": "failure",
         },

@@ -11,7 +11,7 @@ import time
 import tomllib
 import zipfile
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from smoke_deepseek_e2e import (
@@ -207,7 +207,7 @@ def main() -> int:
     started = time.monotonic()
     client = RepoPilotClient("http://127.0.0.1:8000", timeout_seconds=240)
     report: dict = {
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(UTC).isoformat(),
         "checks": {},
     }
     try:

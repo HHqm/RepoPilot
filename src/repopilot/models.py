@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+    model_validator,
+)
 
 
 LLMMode = Literal["mock", "deepseek", "routed"]
@@ -506,11 +513,20 @@ class Reflection(BaseModel):
 class ApprovalDecision(BaseModel):
     approved: bool
     comment: str = Field(default="", max_length=2000)
+    # Rejecting normally sends the artifact back for revision; terminate ends
+    # the project instead. Ignored by the single-gate maintenance workflow.
+    terminate: bool = False
     actor_id: str = Field(default="local-user", min_length=1, max_length=200)
     artifact_digest: str | None = Field(
         default=None,
         pattern=r"^[a-f0-9]{64}$",
     )
+
+    @model_validator(mode="after")
+    def approve_xor_terminate(self) -> ApprovalDecision:
+        if self.approved and self.terminate:
+            raise ValueError("A decision cannot both approve and terminate")
+        return self
 
 
 class RunCreated(BaseModel):

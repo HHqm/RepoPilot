@@ -12,21 +12,22 @@ from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .config import Settings
+from .model_routing import LLM_AGENT_PROFILES
 from .models import (
     ApprovalDecision,
+    IssueRequest,
     ModelRoutingConfig,
     ModelRoutingValidation,
-    ProviderCredentialCreate,
-    ProviderCredentialView,
-    IssueRequest,
     ProjectChatRequest,
     ProjectRequest,
     ProjectSessionCreate,
     ProjectSessionView,
+    ProviderCredentialCreate,
+    ProviderCredentialView,
     RunCreated,
 )
-from .model_routing import LLM_AGENT_PROFILES
 from .service import RepoPilotService
 from .town import (
     AGENT_CATALOG,
@@ -38,7 +39,7 @@ from .town import (
 
 service = RepoPilotService(Settings.from_env())
 atexit.register(service.close)
-FRONTEND_VERSION = "0.6.0"
+FRONTEND_VERSION = __version__
 
 
 @asynccontextmanager
@@ -49,7 +50,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="RepoPilot API",
-    version="0.6.0",
+    version=__version__,
     description=(
         "Human-governed multi-agent software company: client brief to "
         "reviewed, deployable project."
@@ -112,12 +113,13 @@ async def prevent_stale_frontend(request: Request, call_next):
     return response
 
 
-@app.get("/", include_in_schema=False)
+# HEAD is accepted so load balancers and uptime probes get a 200, not a 405.
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 def town_console() -> FileResponse:
     return FileResponse(WEB_ROOT / "index.html")
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health() -> dict[str, str | int]:
     rag = service.suite.rag
     return {

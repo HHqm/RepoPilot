@@ -72,6 +72,7 @@ const elements = {
   approvalMaterial: document.querySelector("#approvalMaterial"),
   approvalComment: document.querySelector("#approvalComment"),
   rejectButton: document.querySelector("#rejectButton"),
+  terminateButton: document.querySelector("#terminateButton"),
   approveButton: document.querySelector("#approveButton"),
   artifactPanel: document.querySelector("#artifactPanel"),
   deliverySummary: document.querySelector("#deliverySummary"),
@@ -954,6 +955,7 @@ function renderApproval(run) {
 
   elements.approvalComment.disabled = !awaiting;
   elements.rejectButton.disabled = !awaiting;
+  elements.terminateButton.disabled = !awaiting;
   elements.approveButton.disabled = !awaiting;
   elements.approvalDetails.open = awaiting;
   elements.approvalCard.dataset.state =
@@ -1112,7 +1114,18 @@ function inferProjectName(seedText = "") {
     .replace(/^(我想做|我们想做|我需要|我们需要|需求是|项目是)[：:\s]*/u, "")
     .trim();
   if (compact.length >= 2) {
-    return compact.slice(0, 28);
+    // Prefer the clause that names the product ("…预约系统") over a hard cut
+    // that ends mid-phrase; fall back to the first sentence, then 28 chars.
+    const sentence = compact.split(/[。！？!?\n]/u)[0];
+    const clauses = sentence.split(/[，,；;]/u).map((part) => part.trim());
+    const named = clauses.find((part) =>
+      /(系统|平台|应用|App|APP|网站|小程序|工具|服务|管理|助手)$/u.test(part),
+    );
+    const candidate = (named || sentence)
+      .replace(/^(我们是.*?[，,]|我们)?(想|要|需要|打算)?(做|开发|建设|搭建)?(一个|一套|一款|个|套|款)?/u, "")
+      .trim();
+    const name = candidate.length >= 2 ? candidate : sentence;
+    return name.length > 28 ? `${name.slice(0, 27)}…` : name;
   }
   return "客户新软件项目";
 }
@@ -1269,17 +1282,25 @@ async function launchWorkshop() {
   }
 }
 
-async function submitDecision(approved) {
+async function submitDecision(approved, terminate = false) {
   if (!currentRun || !currentCheckpoint) return;
   const comment = elements.approvalComment.value.trim();
-  if (!approved && !comment) {
+  if (!approved && !terminate && !comment) {
     elements.approvalComment.focus();
     showToast("退回时必须说明需要修改什么", true);
     return;
   }
+  if (terminate && !window.confirm("终止后本项目不会再继续研发或交付，确定终止吗？")) {
+    return;
+  }
   elements.approveButton.disabled = true;
   elements.rejectButton.disabled = true;
-  elements.approvalState.textContent = approved ? "正在提交确认…" : "正在提交退回…";
+  elements.terminateButton.disabled = true;
+  elements.approvalState.textContent = approved
+    ? "正在提交确认…"
+    : terminate
+      ? "正在终止项目…"
+      : "正在提交退回…";
   try {
     const response = await fetch(
       `/runs/${encodeURIComponent(currentRun.run_id)}/decision`,
@@ -1289,6 +1310,7 @@ async function submitDecision(approved) {
         body: JSON.stringify({
           approved,
           comment,
+          terminate,
           actor_id: "web-client",
           artifact_digest: currentRun.interrupt?.artifact_digest || null,
         }),
@@ -1296,7 +1318,13 @@ async function submitDecision(approved) {
     );
     renderRun(await parseResponse(response));
     elements.approvalComment.value = "";
-    showToast(approved ? "客户决定已确认，团队继续工作" : "已退回相关团队修改");
+    showToast(
+      approved
+        ? "客户决定已确认，团队继续工作"
+        : terminate
+          ? "项目已终止，不会再写入或交付任何文件"
+          : "已退回相关团队修改",
+    );
   } catch (error) {
     showToast(error.message, true);
     await refreshRun().catch(() => {});
@@ -1344,6 +1372,7 @@ function setupInteractions() {
   elements.launchWorkshopButton.addEventListener("click", launchWorkshop);
   elements.approveButton.addEventListener("click", () => submitDecision(true));
   elements.rejectButton.addEventListener("click", () => submitDecision(false));
+  elements.terminateButton.addEventListener("click", () => submitDecision(false, true));
   elements.fillDemo.addEventListener("click", fillDemo);
   elements.newProjectButton.addEventListener("click", resetProject);
   elements.providerForm.addEventListener("submit", connectProvider);

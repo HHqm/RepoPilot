@@ -20,6 +20,9 @@ class IndexedFile:
     symbols: tuple[str, ...] = ()
     chunk_count: int = 0
     redaction_count: int = 0
+    # Last-modified time captured before hashing, or 0 when the timestamp was
+    # too recent to trust (see HybridRAG._trusted_mtime_ns).
+    mtime_ns: int = 0
 
     def to_manifest(self) -> dict[str, Any]:
         return {
@@ -27,6 +30,7 @@ class IndexedFile:
             "document_id": self.document_id,
             "sha256": self.sha256,
             "size": self.size,
+            "mtime_ns": self.mtime_ns,
             "language": self.language,
             "source_type": self.source_type,
             "parser": self.parser,
@@ -36,7 +40,7 @@ class IndexedFile:
         }
 
     @classmethod
-    def from_manifest(cls, value: dict[str, Any]) -> "IndexedFile":
+    def from_manifest(cls, value: dict[str, Any]) -> IndexedFile:
         return cls(
             path=str(value["path"]),
             document_id=str(value["document_id"]),
@@ -48,6 +52,7 @@ class IndexedFile:
             symbols=tuple(str(item) for item in value.get("symbols", [])),
             chunk_count=int(value.get("chunk_count", 0)),
             redaction_count=int(value.get("redaction_count", 0)),
+            mtime_ns=int(value.get("mtime_ns", 0)),
         )
 
 
@@ -142,6 +147,67 @@ class SearchCandidate:
     payload: dict[str, Any]
 
 
+FUSION_METHODS = ("rrf", "dbsf")
+
+
+@dataclass(frozen=True)
+class SearchOptions:
+    """Switches for each retrieval stage, used by production and ablations.
+
+    The default is the production pipeline: dense + sparse recall, Reciprocal
+    Rank Fusion, cross-encoder reranking and per-document diversification.
+    """
+
+    dense: bool = True
+    sparse: bool = True
+    fusion: str = "rrf"
+    rerank: bool = True
+    diversify: bool = True
+
+    def __post_init__(self) -> None:
+        if not (self.dense or self.sparse):
+            raise ValueError("SearchOptions needs dense and/or sparse recall")
+        if self.fusion not in FUSION_METHODS:
+            raise ValueError(f"fusion must be one of {FUSION_METHODS}")
+
+    @property
+    def label(self) -> str:
+        if self.dense and self.sparse:
+            recall = f"hybrid_{self.fusion}"
+        else:
+            recall = "dense" if self.dense else "sparse"
+        stages = [recall]
+        if self.rerank:
+            stages.append("rerank")
+        if self.diversify:
+            stages.append("diversify")
+        return "+".join(stages)
+
+
+@dataclass(frozen=True)
+class RetrievalStats:
+    """Per-query stage timings and funnel sizes for traces and evaluation."""
+
+    options: str
+    embed_ms: float
+    recall_ms: float
+    rerank_ms: float
+    total_ms: float
+    candidates: int
+    returned: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "options": self.options,
+            "embed_ms": round(self.embed_ms, 2),
+            "recall_ms": round(self.recall_ms, 2),
+            "rerank_ms": round(self.rerank_ms, 2),
+            "total_ms": round(self.total_ms, 2),
+            "candidates": self.candidates,
+            "returned": self.returned,
+        }
+
+
 @dataclass
 class IndexedRepository:
     root: Path
@@ -153,6 +219,9 @@ class IndexedRepository:
     reused_files: int
     deleted_files: int
     skipped_files: dict[str, str] = field(default_factory=dict)
+    # Subset of reused_files proven unchanged by (size, mtime) without reading.
+    stat_reused_files: int = 0
+    rebuilt: bool = False
 
     def repo_map(self) -> list[dict[str, Any]]:
         return [

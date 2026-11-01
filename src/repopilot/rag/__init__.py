@@ -5,11 +5,20 @@ incremental indexing, Qdrant storage, hybrid retrieval, and reranking.
 """
 
 from .pipeline import HybridRAG
-from .types import DocumentChunk, IndexedFile, IndexedRepository
+from .types import (
+    DocumentChunk,
+    IndexedFile,
+    IndexedRepository,
+    RetrievalStats,
+    SearchOptions,
+)
+
 
 __all__ = [
     "DocumentChunk",
     "HybridRAG",
     "IndexedFile",
     "IndexedRepository",
+    "RetrievalStats",
+    "SearchOptions",
 ]

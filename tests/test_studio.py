@@ -398,6 +398,7 @@ class SoftwareStudioWorkflowTests(unittest.TestCase):
             release.run_id,
             ApprovalDecision(
                 approved=False,
+                terminate=True,
                 comment="部署资源条件还没有确认，暂不生成交付包。",
                 artifact_digest=release.interrupt["artifact_digest"],
             ),
@@ -412,6 +413,139 @@ class SoftwareStudioWorkflowTests(unittest.TestCase):
         self.assertTrue(rejected_root.is_dir())
         self.assertFalse(any(rejected_root.iterdir()))
         self.assertNotIn("apply_result", rejected.state)
+
+    def _approve_requirements(self, preferred_stack: str = "Python"):
+        accepted = self.service.start_project(self.request(preferred_stack))
+        requirements = self.service.wait(
+            accepted.run_id,
+            statuses={"awaiting_requirements_approval", "failed"},
+            timeout_seconds=30,
+        )
+        self.service.decide(
+            requirements.run_id,
+            ApprovalDecision(
+                approved=True,
+                artifact_digest=requirements.interrupt["artifact_digest"],
+            ),
+        )
+        return self.service.wait(
+            requirements.run_id,
+            statuses={"awaiting_release_approval", "failed"},
+            timeout_seconds=30,
+        )
+
+    def test_release_change_request_loops_back_until_budget_is_spent(self):
+        release = self._approve_requirements()
+        self.assertEqual(release.status, "awaiting_release_approval")
+        for expected_revision in (1, 2):
+            self.service.decide(
+                release.run_id,
+                ApprovalDecision(
+                    approved=False,
+                    comment="请在 README 中补充离线部署步骤。",
+                    artifact_digest=release.interrupt["artifact_digest"],
+                ),
+            )
+            release = self.service.wait(
+                release.run_id,
+                statuses={"awaiting_release_approval", "release_rejected", "failed"},
+                timeout_seconds=30,
+            )
+            self.assertEqual(release.status, "awaiting_release_approval")
+            self.assertEqual(
+                release.state["development_revision"], expected_revision
+            )
+            revision_trace = [
+                trace
+                for trace in release.state["traces"]
+                if trace["metadata"].get("feedback_source")
+            ][-1]
+            self.assertEqual(
+                revision_trace["metadata"]["feedback_source"],
+                "client_change_request",
+            )
+        self.service.decide(
+            release.run_id,
+            ApprovalDecision(
+                approved=False,
+                comment="仍需修改，但预算已用完。",
+                artifact_digest=release.interrupt["artifact_digest"],
+            ),
+        )
+        closed = self.service.wait(
+            release.run_id,
+            statuses={"release_rejected", "failed"},
+            timeout_seconds=30,
+        )
+        self.assertEqual(closed.status, "release_rejected")
+        self.assertFalse(any(Path(closed.state["project_output_path"]).iterdir()))
+
+    def test_terminate_at_prd_review_cancels_without_engineering(self):
+        accepted = self.service.start_project(self.request("Go"))
+        requirements = self.service.wait(
+            accepted.run_id,
+            statuses={"awaiting_requirements_approval", "failed"},
+            timeout_seconds=30,
+        )
+        self.service.decide(
+            requirements.run_id,
+            ApprovalDecision(
+                approved=False,
+                terminate=True,
+                artifact_digest=requirements.interrupt["artifact_digest"],
+            ),
+        )
+        cancelled = self.service.wait(
+            requirements.run_id,
+            statuses={"cancelled", "failed"},
+            timeout_seconds=30,
+        )
+        self.assertEqual(cancelled.status, "cancelled")
+        self.assertNotIn("architecture", cancelled.state)
+
+    def test_prd_rejected_past_budget_reaches_a_terminal_status(self):
+        accepted = self.service.start_project(self.request("Go"))
+        run = self.service.wait(
+            accepted.run_id,
+            statuses={"awaiting_requirements_approval", "failed"},
+            timeout_seconds=30,
+        )
+        for _ in range(4):
+            self.assertEqual(run.status, "awaiting_requirements_approval")
+            self.service.decide(
+                run.run_id,
+                ApprovalDecision(
+                    approved=False,
+                    comment="范围仍不清楚，请再澄清。",
+                    artifact_digest=run.interrupt["artifact_digest"],
+                ),
+            )
+            run = self.service.wait(
+                run.run_id,
+                statuses={"awaiting_requirements_approval", "cancelled", "failed"},
+                timeout_seconds=30,
+            )
+        # Previously ended as "revising_requirements", which never closed the
+        # run, so SSE clients and waiters hung indefinitely.
+        self.assertEqual(run.status, "cancelled")
+        self.assertEqual(run.state["requirements_revision"], 3)
+
+    def test_release_review_rejection_routes_to_revision_with_budget(self):
+        from repopilot.studio_workflow import _after_release_review
+
+        rejected = {"release_review": {"approved": False}}
+        self.assertEqual(
+            _after_release_review({**rejected, "development_revision": 0}),
+            "revise",
+        )
+        self.assertEqual(
+            _after_release_review({**rejected, "development_revision": 2}),
+            "report",
+        )
+
+    def test_decision_cannot_approve_and_terminate(self):
+        with self.assertRaises(ValueError):
+            ApprovalDecision(approved=True, terminate=True)
 
 
 if __name__ == "__main__":

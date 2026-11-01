@@ -1,6 +1,5 @@
 import tempfile
 import unittest
-import tempfile
 from pathlib import Path
 
 from repopilot.repo_tools import TestRunner

@@ -10,7 +10,7 @@ import time
 import uuid
 import zipfile
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -124,7 +124,7 @@ def emit(stage: str, **data) -> None:
     print(
         json.dumps(
             {
-                "time": datetime.now(timezone.utc).isoformat(),
+                "time": datetime.now(UTC).isoformat(),
                 "stage": stage,
                 **data,
             },
@@ -241,7 +241,7 @@ def main() -> int:
     client = RepoPilotClient(args.base_url, timeout_seconds=240)
     report: dict = {
         "base_url": args.base_url,
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": datetime.now(UTC).isoformat(),
         "checks": {},
     }
     try:

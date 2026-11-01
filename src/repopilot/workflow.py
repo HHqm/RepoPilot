@@ -19,7 +19,10 @@ def _continue_or_failure(state: RepoPilotState) -> str:
 def _after_review(state: RepoPilotState) -> str:
     if _has_error(state):
         return "failure"
-    return "approval" if state["review"]["approved"] else "report"
+    if state["review"]["approved"]:
+        return "approval"
+    # The reviewer only asks for a revision while its budget lasts.
+    return "revise" if state.get("status") == "revising_patch" else "report"
 
 
 def _after_approval(state: RepoPilotState) -> str:
@@ -32,6 +35,14 @@ def _after_verification(state: RepoPilotState) -> str:
     if _has_error(state):
         return "failure"
     return "report" if state["verification"]["success"] else "reflect"
+
+
+def _after_reflection(state: RepoPilotState) -> str:
+    if _has_error(state):
+        return "failure"
+    # Repair attempts restart at retrieval so the failing test output can
+    # steer which code is read before re-planning.
+    return "retry" if state.get("status") == "replanning" else "report"
 
 
 def _after_report(state: RepoPilotState) -> str:
@@ -74,7 +85,6 @@ def build_workflow(suite: AgentSuite, checkpointer):
         ("code", "review"),
         ("execute", "test"),
         ("test", "verify"),
-        ("reflect", "report"),
     ):
         graph.add_conditional_edges(
             current,
@@ -85,7 +95,17 @@ def build_workflow(suite: AgentSuite, checkpointer):
     graph.add_conditional_edges(
         "review",
         _after_review,
-        {"approval": "approval", "report": "report", "failure": "failure"},
+        {
+            "approval": "approval",
+            "revise": "code",
+            "report": "report",
+            "failure": "failure",
+        },
+    )
+    graph.add_conditional_edges(
+        "reflect",
+        _after_reflection,
+        {"retry": "retrieve", "report": "report", "failure": "failure"},
     )
     graph.add_conditional_edges(
         "approval",

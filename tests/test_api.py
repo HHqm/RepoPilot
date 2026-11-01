@@ -6,6 +6,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from repopilot import __version__
+
+
 # API tests must never attach to the developer/server Qdrant Local directory.
 # Keep the module-level FastAPI service alive for this test process, but build it
 # against an isolated deterministic runtime before restoring the caller's env.
@@ -43,6 +46,11 @@ class ApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 422)
+
+    def test_uptime_probes_may_use_head(self):
+        client = TestClient(app)
+        self.assertEqual(client.head("/health").status_code, 200)
+        self.assertEqual(client.head("/").status_code, 200)
 
     def test_health_does_not_expose_api_key(self):
         response = TestClient(app).get("/health")
@@ -106,10 +114,12 @@ class ApiTests(unittest.TestCase):
         page = client.get("/")
         self.assertEqual(page.status_code, 200)
         self.assertEqual(page.headers["cache-control"], "no-store, max-age=0")
-        self.assertEqual(page.headers["x-repopilot-frontend"], "0.6.0")
+        self.assertEqual(page.headers["x-repopilot-frontend"], __version__)
         self.assertIn("客户协作软件公司", page.text)
         self.assertIn("直接告诉产品经理", page.text)
-        self.assertIn("UI 0.6.0 · MULTI MODEL", page.text)
+        # index.html hardcodes cache-busting versions; fail if they drift.
+        self.assertIn(f"UI {__version__} · MULTI MODEL", page.text)
+        self.assertIn(f"app.js?v={__version__}", page.text)
         self.assertIn("AUTO-CREATE ON FIRST MESSAGE", page.text)
         self.assertIn("YOUR PRODUCT MANAGER", page.text)
         self.assertIn("项目资料库", page.text)
@@ -178,7 +188,7 @@ class ApiTests(unittest.TestCase):
             body["workflow"],
             "collaborative_project_factory",
         )
-        self.assertEqual(body["frontend_version"], "0.6.0")
+        self.assertEqual(body["frontend_version"], __version__)
         self.assertEqual(len(body["model_agents"]), 8)
         self.assertTrue(
             any(

@@ -224,16 +224,23 @@ class StructureAwareChunker:
     ) -> list[ParsedBlock]:
         if not lines:
             return []
+        # Tokenize each line once; the window and overlap scans below revisit
+        # lines repeatedly and used to re-run the tokenizer every time.
+        line_tokens = [
+            max(1, len(multilingual_tokens(line))) for line in lines
+        ]
         blocks: list[ParsedBlock] = []
         cursor = 0
         while cursor < len(lines):
             end = cursor
             token_count = 0
             while end < len(lines):
-                line_tokens = max(1, len(multilingual_tokens(lines[end])))
-                if end > cursor and token_count + line_tokens > self.max_tokens:
+                if (
+                    end > cursor
+                    and token_count + line_tokens[end] > self.max_tokens
+                ):
                     break
-                token_count += line_tokens
+                token_count += line_tokens[end]
                 end += 1
             if end == cursor:
                 end += 1
@@ -255,6 +262,6 @@ class StructureAwareChunker:
             next_cursor = end
             while next_cursor > cursor + 1 and overlap < self.overlap_tokens:
                 next_cursor -= 1
-                overlap += max(1, len(multilingual_tokens(lines[next_cursor])))
+                overlap += line_tokens[next_cursor]
             cursor = next_cursor
         return blocks

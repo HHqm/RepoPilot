@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import time
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 from threading import RLock
-from typing import Any, Callable
+from typing import Any
 
 from langgraph.errors import GraphInterrupt
 from langgraph.types import interrupt
@@ -42,7 +43,9 @@ from .prompts import (
     REVIEWER_SYSTEM,
 )
 from .rag import HybridRAG, IndexedRepository
+from .rag.multi_query import fuse_rankings, plan_queries
 from .repo_tools import PatchApplier, TestRunner, artifact_digest, unified_diff
+from .run_metrics import render_run_metrics, summarize_run_metrics
 from .security import resolve_safe_path, scan_content
 from .state import RepoPilotState
 
@@ -139,6 +142,10 @@ class AgentSuite:
             payload=compressed,
             schema_name=schema_name,
         )
+        # Read usage right after each call: the adapter keeps only the latest.
+        api_usage = getattr(llm, "last_usage", None)
+        if api_usage:
+            context_stats["api_usage"] = dict(api_usage)
         repair_attempts = 0
         schema_model = self._SCHEMA_MODELS.get(schema_name)
         if schema_model is not None:
@@ -170,11 +177,11 @@ class AgentSuite:
                     payload=repaired,
                     schema_name=schema_name,
                 )
+                repair_usage = getattr(llm, "last_usage", None)
+                if repair_usage:
+                    repair_context["api_usage"] = dict(repair_usage)
                 result = schema_model.model_validate(result).model_dump()
                 context_stats["repair_context"] = repair_context
-        api_usage = getattr(llm, "last_usage", None)
-        if api_usage:
-            context_stats["api_usage"] = dict(api_usage)
         route_metadata = getattr(llm, "route_metadata", None)
         if route_metadata:
             context_stats["model_route"] = dict(route_metadata)
@@ -318,25 +325,56 @@ class AgentSuite:
     def retrieval_agent(self, state: RepoPilotState) -> dict[str, Any]:
         started = time.perf_counter()
         index = self._get_index(state)
-        query = "\n".join([state["issue"], *state.get("constraints", [])])
-        evidence = self.rag.search(
-            index,
-            query,
-            top_k=self.settings.rag_top_k,
+        history = state.get("attempt_history") or []
+        queries = plan_queries(
+            state["issue"],
+            state.get("constraints", []),
+            last_failure=history[-1] if history else None,
         )
+        rankings = []
+        query_reports = []
+        for planned in queries:
+            ranking, stats = self.rag.search_with_stats(
+                index,
+                planned.text,
+                top_k=self.settings.rag_top_k,
+            )
+            rankings.append(ranking)
+            query_reports.append(
+                {
+                    **planned.to_dict(),
+                    "top_paths": list(
+                        dict.fromkeys(item.path for item in ranking)
+                    )[:5],
+                    "stats": stats.to_dict(),
+                }
+            )
+        evidence = fuse_rankings(rankings, top_k=self.settings.rag_top_k)
+        retrieval = {
+            "queries": query_reports,
+            "fusion": "reciprocal_rank_fusion" if len(queries) > 1 else "none",
+            "evidence_count": len(evidence),
+        }
+        purposes = "+".join(item.purpose for item in queries)
         return {
             "evidence": [item.model_dump() for item in evidence],
+            "retrieval": retrieval,
             "status": "planning_change",
             "traces": [
                 self._trace(
                     "RetrievalAgent",
                     started,
-                    f"Retrieved {len(evidence)} grounded code/document chunks.",
+                    (
+                        f"Retrieved {len(evidence)} grounded chunks from "
+                        f"{len(queries)} planned quer"
+                        f"{'y' if len(queries) == 1 else 'ies'} ({purposes})."
+                    ),
                     metadata={
                         "top_paths": list(
                             dict.fromkeys(item.path for item in evidence)
                         ),
-                        "retrieval": "qdrant_dense_sparse_rrf_rerank",
+                        "retrieval": retrieval,
+                        "pipeline": "qdrant_dense_sparse_rrf_rerank",
                         "embedding_model": self.rag.store.embedding.model_id,
                         "sparse_model": self.rag.store.embedding.sparse_model_id,
                         "reranker_model": self.rag.store.reranker.model_id,
@@ -356,6 +394,7 @@ class AgentSuite:
                 "constraints": state.get("constraints", []),
                 "repo_map": state["repo_map"],
                 "evidence": state["evidence"],
+                **self._attempt_context(state),
             },
         )
         plan = ChangePlan.model_validate(data)
@@ -372,6 +411,7 @@ class AgentSuite:
                 raise ValueError(
                     f"Planner referenced unknown evidence: {sorted(unknown_evidence)}"
                 )
+        attempt = int(state.get("repair_attempt", 0))
         return {
             "plan": plan.model_dump(),
             "status": "generating_patch",
@@ -379,11 +419,24 @@ class AgentSuite:
                 self._trace(
                     "PlannerAgent",
                     started,
-                    f"Created a {len(plan.steps)}-step grounded change plan.",
-                    metadata={"context": context_stats},
+                    f"Created a {len(plan.steps)}-step grounded change plan"
+                    + (
+                        f" for repair attempt {attempt}."
+                        if attempt
+                        else "."
+                    ),
+                    metadata={"context": context_stats, "repair_attempt": attempt},
                 )
             ],
         }
+
+    @staticmethod
+    def _attempt_context(state: RepoPilotState) -> dict[str, Any]:
+        """Failed attempts are only sent when they exist, keeping the first
+        attempt's payload identical to a run without self-correction."""
+
+        history = state.get("attempt_history") or []
+        return {"previous_attempts": history} if history else {}
 
     def coder_agent(self, state: RepoPilotState) -> dict[str, Any]:
         started = time.perf_counter()
@@ -429,6 +482,9 @@ class AgentSuite:
                     "excerpts": excerpts,
                 }
             )
+        feedback: dict[str, Any] = dict(self._attempt_context(state))
+        if state.get("status") == "revising_patch" and state.get("review_feedback"):
+            feedback["review_feedback"] = state["review_feedback"]
         draft_data, context_stats = self._complete_json(
             state,
             system_prompt=CODER_SYSTEM,
@@ -439,6 +495,7 @@ class AgentSuite:
                 "plan": state["plan"],
                 "evidence": state["evidence"],
                 "files": files,
+                **feedback,
             },
         )
         drafts = CodeEditSet.model_validate(draft_data)
@@ -476,6 +533,7 @@ class AgentSuite:
                     "evidence": state["evidence"],
                     "files": repair_files,
                     "tool_error": str(mismatch),
+                    **feedback,
                 },
             )
             repaired = CodeEditSet.model_validate(repaired_data)
@@ -508,6 +566,7 @@ class AgentSuite:
             )
         if not proposals:
             raise ValueError("Coder proposed no effective targeted edits")
+        revising = "review_feedback" in feedback
         return {
             "proposals": [item.model_dump() for item in proposals],
             "status": "reviewing_patch",
@@ -515,9 +574,11 @@ class AgentSuite:
                 self._trace(
                     "CoderAgent",
                     started,
-                    f"Proposed {len(proposals)} file replacement(s).",
+                    f"Proposed {len(proposals)} file replacement(s)"
+                    + (" addressing review findings." if revising else "."),
                     metadata={
                         "paths": [item.path for item in proposals],
+                        "addresses_review": revising,
                         "context": context_stats,
                     },
                 )
@@ -579,23 +640,40 @@ class AgentSuite:
                 f"{len(deterministic_findings)} blocking finding(s) detected."
             )
         review = ReviewDecision.model_validate(review_data)
-        status = "awaiting_approval" if review.approved else "review_rejected"
-        return {
-            "review": review.model_dump(),
-            "status": status,
-            "traces": [
-                self._trace(
-                    "ReviewerAgent",
-                    started,
-                    review.summary,
-                    metadata={
-                        "approved": review.approved,
-                        "findings": len(review.findings),
-                        "context": context_stats,
-                    },
-                )
-            ],
-        }
+        revision = int(state.get("review_revision", 0))
+        update: dict[str, Any] = {"review": review.model_dump()}
+        if review.approved:
+            update["status"] = "awaiting_approval"
+        elif revision < self.settings.max_review_revisions:
+            # Critic loop: hand the findings back to the coder instead of
+            # ending the run. Deterministic safety findings are included, and
+            # the revised patch must pass this same gate again.
+            update.update(
+                status="revising_patch",
+                review_revision=revision + 1,
+                review_feedback={
+                    "summary": review.summary,
+                    "findings": [item.model_dump() for item in review.findings],
+                    "rejected_diffs": all_diffs,
+                },
+            )
+        else:
+            update["status"] = "review_rejected"
+        update["traces"] = [
+            self._trace(
+                "ReviewerAgent",
+                started,
+                review.summary,
+                metadata={
+                    "approved": review.approved,
+                    "findings": len(review.findings),
+                    "review_revision": revision,
+                    "revision_requested": update["status"] == "revising_patch",
+                    "context": context_stats,
+                },
+            )
+        ]
+        return update
 
     def approval_agent(self, state: RepoPilotState) -> dict[str, Any]:
         started = time.perf_counter()
@@ -721,19 +799,80 @@ class AgentSuite:
             },
         )
         reflection = Reflection.model_validate(data)
-        return {
+        attempt = int(state.get("repair_attempt", 0))
+        history = list(state.get("attempt_history") or [])
+        history.append(
+            {
+                "attempt": attempt,
+                "plan_summary": state["plan"].get("summary", ""),
+                "changed_files": [item["path"] for item in state["proposals"]],
+                "diff": "\n".join(item["diff"] for item in state["proposals"])[
+                    :4_000
+                ],
+                "test_failure": self._test_failure_excerpt(state["test_result"]),
+                "root_cause": reflection.root_cause,
+                "next_action": reflection.next_action,
+            }
+        )
+        retry = (
+            reflection.retry_recommended
+            and attempt < self.settings.max_repair_attempts
+        )
+        update: dict[str, Any] = {
             "reflection": reflection.model_dump(),
-            "status": "failed_rolled_back",
-            "traces": [
-                self._trace(
-                    "ReflectionAgent",
-                    started,
-                    reflection.root_cause,
-                    status="failed",
-                    metadata={"context": context_stats},
-                )
-            ],
+            "attempt_history": history,
         }
+        if retry:
+            # The verifier already restored every file. Clear the attempt's
+            # artifacts so the next patch is re-reviewed and re-approved by a
+            # human from scratch; only the lessons in attempt_history carry on.
+            update.update(
+                status="replanning",
+                repair_attempt=attempt + 1,
+                proposals=[],
+                review={},
+                review_revision=0,
+                review_feedback={},
+                approved=False,
+                approval_comment="",
+                apply_result={},
+                test_result={},
+                verification={},
+            )
+            summary = (
+                f"{reflection.root_cause} Starting repair attempt "
+                f"{attempt + 1}/{self.settings.max_repair_attempts}."
+            )
+        else:
+            update["status"] = "failed_rolled_back"
+            summary = reflection.root_cause
+        update["traces"] = [
+            self._trace(
+                "ReflectionAgent",
+                started,
+                summary,
+                status="failed",
+                metadata={
+                    "context": context_stats,
+                    "retry": retry,
+                    "repair_attempt": attempt,
+                    "retry_recommended": reflection.retry_recommended,
+                },
+            )
+        ]
+        return update
+
+    @staticmethod
+    def _test_failure_excerpt(test_result: dict[str, Any]) -> str:
+        output = "\n".join(
+            part
+            for part in (
+                str(test_result.get("stdout") or ""),
+                str(test_result.get("stderr") or ""),
+            )
+            if part
+        )
+        return output[-2_000:]
 
     def reporter_agent(self, state: RepoPilotState) -> dict[str, Any]:
         started = time.perf_counter()
@@ -769,6 +908,17 @@ class AgentSuite:
             if test_result
             else "not executed"
         )
+        attempt_lines = "\n".join(
+            f"- Attempt {item['attempt'] + 1}: changed "
+            f"{', '.join(f'`{path}`' for path in item['changed_files']) or 'nothing'}"
+            f" — tests failed; root cause: {item['root_cause']}"
+            for item in state.get("attempt_history", [])
+        )
+        query_lines = "\n".join(
+            f"- `{item['purpose']}`: {item['query'][:120]}"
+            for item in (state.get("retrieval") or {}).get("queries", [])
+        )
+        metrics = summarize_run_metrics(state.get("traces", []))
         report = f"""# RepoPilot Run {state['run_id']}
 
 ## Outcome
@@ -777,6 +927,16 @@ class AgentSuite:
 - Issue: {state['issue']}
 - LLM mode: `{state.get('llm_mode')}`
 - Test: {test_text}
+- Repair attempts used: {state.get('repair_attempt', 0)}/{self.settings.max_repair_attempts}
+- Review revisions used in final attempt: {state.get('review_revision', 0)}/{self.settings.max_review_revisions}
+
+## Self-correction history
+
+{attempt_lines or '- First attempt; no failed attempts.'}
+
+## Retrieval plan
+
+{query_lines or '- none'}
 
 ## Retrieved evidence
 
@@ -792,12 +952,17 @@ class AgentSuite:
 {json.dumps(state.get('review', {}), ensure_ascii=False, indent=2)}
 ```
 
+## Cost and latency
+
+{render_run_metrics(metrics)}
+
 ## Agent trace
 
 {trace_lines or '- none'}
 """
         result = {
             "report": report,
+            "run_metrics": metrics,
             "status": final_status,
             "traces": [
                 self._trace(
@@ -836,6 +1001,7 @@ class AgentSuite:
         agent = error.get("agent", "unknown")
         error_type = error.get("type", "RuntimeError")
         message = error.get("message", "Unknown workflow failure")
+        metrics = summarize_run_metrics(state.get("traces", []))
         report = f"""# RepoPilot Run {state['run_id']} — Failed safely
 
 ## Outcome
@@ -854,11 +1020,16 @@ class AgentSuite:
 
 The exception was converted into structured state and the workflow ended through
 the failure reporter instead of exposing an unhandled server exception.
+
+## Cost and latency
+
+{render_run_metrics(metrics)}
 """
         self._release_index(state["run_id"])
         return {
             "status": "failed",
             "error": error,
+            "run_metrics": metrics,
             "report": report,
             "traces": [
                 self._trace(

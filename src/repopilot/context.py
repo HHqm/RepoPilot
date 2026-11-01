@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 from .config import Settings
 
@@ -114,7 +115,7 @@ class ContextCompressor:
         self.max_test_output_tokens = max(256, max_test_output_tokens)
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> "ContextCompressor":
+    def from_settings(cls, settings: Settings) -> ContextCompressor:
         return cls(
             max_input_tokens=settings.context_max_input_tokens,
             planner_tokens=settings.context_planner_tokens,
@@ -236,7 +237,11 @@ class ContextCompressor:
         evidence_paths = {
             str(item.get("path", "")) for item in evidence if item.get("path")
         }
-        return {
+        attempts = payload.get("previous_attempts") or []
+        # Failed attempts take their share from evidence: re-planning must see
+        # why the last patch failed even if that costs some retrieved context.
+        attempts_share = 0.15 if attempts else 0.0
+        compact = {
             "issue": self._fit_text(
                 str(payload.get("issue", "")),
                 int(budget * 0.10),
@@ -256,10 +261,17 @@ class ContextCompressor:
             ),
             "evidence": self._compact_evidence(
                 evidence,
-                int(budget * 0.55),
+                int(budget * (0.55 - attempts_share)),
                 tracker,
             ),
         }
+        if attempts:
+            compact["previous_attempts"] = self._fit_nested_value(
+                attempts,
+                int(budget * attempts_share),
+                tracker,
+            )
+        return compact
 
     def _coder_payload(
         self,
@@ -278,7 +290,14 @@ class ContextCompressor:
             for step in plan.get("steps", [])
             for evidence_id in step.get("evidence_ids", [])
         }
-        return {
+        feedback_keys = [
+            key
+            for key in ("review_feedback", "previous_attempts")
+            if payload.get(key)
+        ]
+        # Feedback is carved out of the file budget, 6% per kind present.
+        feedback_share = 0.06
+        compact = {
             "issue": self._fit_text(
                 str(payload.get("issue", "")),
                 int(budget * 0.07),
@@ -304,10 +323,21 @@ class ContextCompressor:
             ),
             "files": self._compact_files(
                 payload.get("files") or [],
-                int(budget * 0.54),
+                int(budget * (0.54 - feedback_share * len(feedback_keys))),
                 tracker,
             ),
         }
+        for key in feedback_keys:
+            compact[key] = self._fit_nested_value(
+                payload[key],
+                int(budget * feedback_share),
+                tracker,
+            )
+        if payload.get("tool_error"):
+            compact["tool_error"] = self._fit_text(
+                str(payload["tool_error"]), 256, tracker
+            )
+        return compact
 
     def _reviewer_payload(
         self,

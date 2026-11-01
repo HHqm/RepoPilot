@@ -5,6 +5,7 @@ import json
 import shutil
 import sys
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 from .config import Settings
@@ -65,19 +66,16 @@ def command_decide(args: argparse.Namespace) -> int:
                 ).get("artifact_digest"),
             ),
         )
-        run = service.wait(
-            resumed.run_id,
-            statuses={
-                "completed",
-                "cancelled",
-                "review_rejected",
-                "failed_rolled_back",
-                "failed",
-            },
-            timeout_seconds=300,
-        )
+        # A failed test can trigger a repair attempt whose new patch stops at
+        # the approval gate again, so wait for any terminal or human state.
+        run = service.wait(resumed.run_id, timeout_seconds=300)
         _print_run(run)
-    return 0 if run.status in {"completed", "cancelled"} else 1
+        if run.status == "awaiting_approval":
+            print(
+                "A repair attempt produced a new patch; review it and run "
+                f"`repopilot decide --run-id {run.run_id} --approve` again."
+            )
+    return 0 if run.status in {"completed", "cancelled", "awaiting_approval"} else 1
 
 
 def command_demo(args: argparse.Namespace) -> int:
@@ -86,7 +84,15 @@ def command_demo(args: argparse.Namespace) -> int:
     target = demo_parent / "buggy_calculator"
     shutil.copytree(source, target)
     runtime = demo_parent / ".repopilot"
-    settings = Settings.from_env(runtime)
+    base = Settings.from_env(runtime)
+    # The safety defaults protect arbitrary user repositories. The demo runs
+    # RepoPilot's own bundled fixture in a private temp copy, so it trusts
+    # exactly that directory and nothing else.
+    settings = replace(
+        base,
+        allowed_workspace_roots=(*base.allowed_workspace_roots, demo_parent),
+        allow_host_test_execution=True,
+    )
     with RepoPilotService(settings) as service:
         accepted = service.start(
             IssueRequest(
@@ -101,22 +107,19 @@ def command_demo(args: argparse.Namespace) -> int:
             )
         )
         run = service.wait(accepted.run_id, timeout_seconds=60)
-        print("=== Proposal (repository is still unchanged) ===")
-        _print_run(run)
-        resumed = service.decide(
-            run.run_id,
-            ApprovalDecision(
-                approved=True,
-                comment="Approved by offline demo.",
-                actor_id="offline-demo",
-                artifact_digest=run.interrupt["artifact_digest"],
-            ),
-        )
-        run = service.wait(
-            resumed.run_id,
-            statuses={"completed", "failed_rolled_back", "failed"},
-            timeout_seconds=60,
-        )
+        while run.status == "awaiting_approval":
+            print("=== Proposal (repository is still unchanged) ===")
+            _print_run(run)
+            service.decide(
+                run.run_id,
+                ApprovalDecision(
+                    approved=True,
+                    comment="Approved by offline demo.",
+                    actor_id="offline-demo",
+                    artifact_digest=run.interrupt["artifact_digest"],
+                ),
+            )
+            run = service.wait(run.run_id, timeout_seconds=60)
         print("=== Result after approval ===")
         _print_run(run)
     print(f"Demo workspace: {target}")

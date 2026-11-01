@@ -1,5 +1,34 @@
-{"case_id":"safe-divide-code","repository":"examples/buggy_calculator","query":"safe_divide 在除数为零时应该抛出 ValueError","relevant_paths":["src/calculator.py"]}
-{"case_id":"safe-divide-tests","repository":"examples/buggy_calculator","query":"哪个测试覆盖 safe_divide 的零除数异常行为","relevant_paths":["tests/test_calculator.py"]}
-{"case_id":"qdrant-version-cleanup","repository":".","query":"delete_old_document_versions document_version Qdrant filter","relevant_paths":["src/repopilot/rag/store.py"]}
-{"case_id":"pdf-docling-fallback","repository":".","query":"Docling PDF signature OCR pypdf text fallback parser","relevant_paths":["src/repopilot/rag/parsers.py"]}
-{"case_id":"rrf-reranking","repository":".","query":"dense sparse Prefetch Fusion RRF reranker candidates","relevant_paths":["src/repopilot/rag/store.py"]}
+{"case_id":"safe-divide-code","category":"natural_zh","repository":"examples/buggy_calculator","query":"safe_divide 在除数为零时应该抛出 ValueError","relevant_paths":["src/calculator.py"]}
+{"case_id":"safe-divide-tests","category":"natural_zh","repository":"examples/buggy_calculator","query":"哪个测试覆盖 safe_divide 的零除数异常行为","relevant_paths":["tests/test_calculator.py"]}
+{"case_id":"qdrant-version-cleanup","category":"identifier","repository":"src","query":"delete_old_document_versions document_version Qdrant filter","relevant_paths":["repopilot/rag/store.py"]}
+{"case_id":"pdf-docling-fallback","category":"identifier","repository":"src","query":"Docling PDF signature OCR pypdf text fallback parser","relevant_paths":["repopilot/rag/parsers.py"]}
+{"case_id":"rrf-reranking","category":"identifier","repository":"src","query":"dense sparse Prefetch Fusion RRF reranker candidates","relevant_paths":["repopilot/rag/store.py"]}
+{"case_id":"bearer-token-auth","category":"identifier","repository":"src","query":"hmac.compare_digest Bearer token WWW-Authenticate","relevant_paths":["repopilot/api.py"]}
+{"case_id":"durable-event-insert","category":"identifier","repository":"src","query":"BEGIN IMMEDIATE run_events sequence data_json","relevant_paths":["repopilot/service.py"]}
+{"case_id":"targeted-edit-mismatch","category":"identifier","repository":"src","query":"TargetedEditMismatch search must match exactly once","relevant_paths":["repopilot/agents.py"]}
+{"case_id":"token-estimate","category":"identifier","repository":"src","query":"estimate_text_tokens CJK estimate_json_tokens","relevant_paths":["repopilot/context.py"]}
+{"case_id":"private-endpoint-check","category":"identifier","repository":"src","query":"ipaddress is_private is_loopback base_url","relevant_paths":["repopilot/model_routing.py"]}
+{"case_id":"denied-pytest-options","category":"identifier","repository":"src","query":"_DENIED_PYTEST_OPTIONS --rootdir --override-ini","relevant_paths":["repopilot/repo_tools.py"]}
+{"case_id":"reproducible-zip","category":"identifier","repository":"src","query":"zipfile.ZipInfo date_time external_attr","relevant_paths":["repopilot/studio_agents.py"]}
+{"case_id":"sse-resume-cursor","category":"natural_zh","repository":"src","query":"SSE 断线重连后如何从上次收到的事件序号继续推送","relevant_paths":["repopilot/api.py","repopilot/service.py"]}
+{"case_id":"stale-approval-digest","category":"natural_zh","repository":"src","query":"人工审批时如何防止批准一个已经过期的 diff","relevant_paths":["repopilot/service.py","repopilot/agents.py","repopilot/repo_tools.py"]}
+{"case_id":"ssrf-guard","category":"natural_zh","repository":"src","query":"模型供应商地址如何阻止访问本机和内网以防 SSRF","relevant_paths":["repopilot/model_routing.py"]}
+{"case_id":"shell-operator-block","category":"natural_zh","repository":"src","query":"测试命令里禁止使用管道、重定向等 shell 操作符","relevant_paths":["repopilot/repo_tools.py"]}
+{"case_id":"rollback-on-failure","category":"natural_zh","repository":"src","query":"测试不通过时如何把已经写入的文件回滚到原始内容","relevant_paths":["repopilot/repo_tools.py","repopilot/agents.py"]}
+{"case_id":"secret-redaction","category":"natural_zh","repository":"src","query":"上传文件中的 API Key 和私钥在写入向量库之前被替换掉","relevant_paths":["repopilot/rag/parsers.py"]}
+{"case_id":"diff-compression","category":"natural_zh","repository":"src","query":"超出上下文预算时确定性压缩 diff 并保留所有改动行","relevant_paths":["repopilot/context.py"]}
+{"case_id":"schema-repair","category":"natural_zh","repository":"src","query":"模型返回的 JSON 结构校验失败后只允许修复一次","relevant_paths":["repopilot/agents.py"]}
+{"case_id":"python-ast-chunking","category":"natural_zh","repository":"src","query":"按 Python 函数和类的语法树边界切分知识块","relevant_paths":["repopilot/rag/chunking.py"]}
+{"case_id":"launch-race","category":"natural_zh","repository":"src","query":"重复点击召开需求评审会时如何避免并发重复启动","relevant_paths":["repopilot/collaboration.py"]}
+{"case_id":"llm-retry-backoff","category":"natural_en","repository":"src","query":"retry provider requests on rate limits or server errors with jittered backoff","relevant_paths":["repopilot/llm.py"]}
+{"case_id":"path-traversal","category":"natural_en","repository":"src","query":"reject absolute paths and sensitive files when resolving a repository path","relevant_paths":["repopilot/security.py"]}
+{"case_id":"queue-capacity","category":"natural_en","repository":"src","query":"reject new runs when the background queue is full","relevant_paths":["repopilot/service.py"]}
+{"case_id":"phase-labels","category":"natural_en","repository":"src","query":"human readable label for each workflow status shown in the workbench","relevant_paths":["repopilot/town.py"]}
+{"case_id":"budget-scope","category":"doc_zh","repository":"knowledge_base","query":"预算不够的时候应该如何调整项目范围","relevant_paths":["raw/governance/budget-policy-risk.md"]}
+{"case_id":"scanned-pdf-parser","category":"doc_zh","repository":"knowledge_base","query":"扫描版 PDF 和复杂表格应该用什么解析","relevant_paths":["raw/operations/rag-runbook.md"]}
+{"case_id":"multi-tenant-fields","category":"doc_zh","repository":"knowledge_base","query":"多租户部署时向量库需要增加哪些权限过滤字段","relevant_paths":["raw/security/knowledge-governance.md"]}
+{"case_id":"monolith-vs-microservice","category":"doc_zh","repository":"knowledge_base","query":"什么情况下应该拆微服务而不是模块化单体","relevant_paths":["raw/architecture/polyglot-selection.md"]}
+{"case_id":"release-conditions","category":"doc_zh","repository":"knowledge_base","query":"正式上线之前必须满足哪些条件","relevant_paths":["raw/operations/release-and-handover.md"]}
+{"case_id":"prd-rejected","category":"doc_zh","repository":"knowledge_base","query":"客户退回需求文档以后产品经理要怎么处理","relevant_paths":["raw/product/prd-and-discovery.md"]}
+{"case_id":"ghost-knowledge","category":"doc_zh","repository":"knowledge_base","query":"源文件删除以后怎样避免向量库里残留旧知识","relevant_paths":["raw/security/knowledge-governance.md"]}
+{"case_id":"rerank-before-planner","category":"doc_en","repository":"knowledge_base","query":"how are fused candidates reordered before the planner receives evidence","relevant_paths":["raw/architecture/retrieval-architecture.md"]}

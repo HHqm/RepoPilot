@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import time
+from collections.abc import Sequence
 from hashlib import sha256
 from pathlib import Path
 from threading import RLock
-from typing import Sequence
 from uuid import NAMESPACE_URL, uuid5
 
 from qdrant_client import QdrantClient, models
 
 from .embeddings import HybridEmbeddingProvider, Reranker
-from .types import DocumentChunk, RAG_SCHEMA_VERSION, SearchCandidate
+from .types import (
+    RAG_SCHEMA_VERSION,
+    DocumentChunk,
+    RetrievalStats,
+    SearchCandidate,
+    SearchOptions,
+)
+
+
+_FUSIONS = {"rrf": models.Fusion.RRF, "dbsf": models.Fusion.DBSF}
 
 
 class QdrantVectorStore:
@@ -61,7 +71,6 @@ class QdrantVectorStore:
             ).encode("utf-8")
         ).hexdigest()[:12]
         self.collection_name = f"repopilot_chunks_{schema_fingerprint}"
-        self.collection_was_created = False
         self._ensure_collection()
 
     def _ensure_collection(self) -> None:
@@ -82,7 +91,6 @@ class QdrantVectorStore:
                     },
                     on_disk_payload=not self.local_mode,
                 )
-                self.collection_was_created = True
             if not self.local_mode:
                 for field_name in (
                     "repo_id",
@@ -174,6 +182,18 @@ class QdrantVectorStore:
                 wait=True,
             )
 
+    def count_repository(self, repo_id: str) -> int:
+        with self._lock:
+            return int(
+                self.client.count(
+                    collection_name=self.collection_name,
+                    count_filter=models.Filter(
+                        must=[self._match("repo_id", repo_id)]
+                    ),
+                    exact=True,
+                ).count
+            )
+
     def search(
         self,
         *,
@@ -181,8 +201,19 @@ class QdrantVectorStore:
         query: str,
         top_k: int,
         source_types: Sequence[str] | None = None,
-    ) -> list[tuple[SearchCandidate, float]]:
+        options: SearchOptions | None = None,
+    ) -> tuple[list[tuple[SearchCandidate, float]], RetrievalStats]:
+        """Recall → (fusion) → rerank → diversify, timing every stage.
+
+        Without reranking the fused (or single-retriever) score ranks results,
+        and the reranker probability threshold no longer applies because the
+        scores live on a different scale.
+        """
+
+        options = options or SearchOptions()
+        started = time.perf_counter()
         dense, sparse = self.embedding.encode_query(query)
+        embedded = time.perf_counter()
         conditions = [self._match("repo_id", repo_id)]
         if source_types:
             conditions.append(
@@ -193,32 +224,50 @@ class QdrantVectorStore:
             )
         repository_filter = models.Filter(must=conditions)
         candidate_limit = max(top_k, self.candidate_k)
-        with self._lock:
-            response = self.client.query_points(
-                collection_name=self.collection_name,
-                prefetch=[
-                    models.Prefetch(
-                        query=dense,
-                        using=self.DENSE_VECTOR,
-                        filter=repository_filter,
-                        limit=candidate_limit,
+        recall_queries: list[tuple[str, object]] = []
+        if options.dense:
+            recall_queries.append((self.DENSE_VECTOR, dense))
+        if options.sparse:
+            recall_queries.append(
+                (
+                    self.SPARSE_VECTOR,
+                    models.SparseVector(
+                        indices=sparse.indices,
+                        values=sparse.values,
                     ),
-                    models.Prefetch(
-                        query=models.SparseVector(
-                            indices=sparse.indices,
-                            values=sparse.values,
-                        ),
-                        using=self.SPARSE_VECTOR,
-                        filter=repository_filter,
-                        limit=candidate_limit,
-                    ),
-                ],
-                query=models.FusionQuery(fusion=models.Fusion.RRF),
-                query_filter=repository_filter,
-                limit=candidate_limit,
-                with_payload=True,
-                with_vectors=False,
+                )
             )
+        with self._lock:
+            if len(recall_queries) == 1:
+                using, vector = recall_queries[0]
+                response = self.client.query_points(
+                    collection_name=self.collection_name,
+                    query=vector,
+                    using=using,
+                    query_filter=repository_filter,
+                    limit=candidate_limit,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            else:
+                response = self.client.query_points(
+                    collection_name=self.collection_name,
+                    prefetch=[
+                        models.Prefetch(
+                            query=vector,
+                            using=using,
+                            filter=repository_filter,
+                            limit=candidate_limit,
+                        )
+                        for using, vector in recall_queries
+                    ],
+                    query=models.FusionQuery(fusion=_FUSIONS[options.fusion]),
+                    query_filter=repository_filter,
+                    limit=candidate_limit,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+        recalled = time.perf_counter()
         candidates = [
             SearchCandidate(
                 point_id=str(point.id),
@@ -227,33 +276,53 @@ class QdrantVectorStore:
             )
             for point in response.points
         ]
-        rerank_scores = self.reranker.score(
-            query,
-            [
-                self._contextualized_payload(candidate.payload)
-                for candidate in candidates
-            ],
-        )
+        if options.rerank:
+            scores = self.reranker.score(
+                query,
+                [
+                    self._contextualized_payload(candidate.payload)
+                    for candidate in candidates
+                ],
+            )
+            threshold = self.score_threshold
+            reranked = time.perf_counter()
+        else:
+            scores = [candidate.fusion_score for candidate in candidates]
+            threshold = float("-inf")
+            reranked = recalled
         ranked = sorted(
-            zip(candidates, rerank_scores, strict=True),
+            zip(candidates, scores, strict=True),
             key=lambda item: (item[1], item[0].fusion_score),
             reverse=True,
         )
-        diversified: list[tuple[SearchCandidate, float]] = []
+        per_document_limit = (
+            self.max_chunks_per_document if options.diversify else top_k
+        )
+        selected: list[tuple[SearchCandidate, float]] = []
         document_counts: dict[str, int] = {}
         for item in ranked:
-            candidate, rerank_score = item
-            if rerank_score < self.score_threshold:
+            candidate, score = item
+            if score < threshold:
                 continue
             document_id = str(candidate.payload.get("document_id", ""))
             count = document_counts.get(document_id, 0)
-            if count >= self.max_chunks_per_document:
+            if count >= per_document_limit:
                 continue
             document_counts[document_id] = count + 1
-            diversified.append(item)
-            if len(diversified) >= top_k:
+            selected.append(item)
+            if len(selected) >= top_k:
                 break
-        return diversified
+        finished = time.perf_counter()
+        stats = RetrievalStats(
+            options=options.label,
+            embed_ms=(embedded - started) * 1000,
+            recall_ms=(recalled - embedded) * 1000,
+            rerank_ms=(reranked - recalled) * 1000,
+            total_ms=(finished - started) * 1000,
+            candidates=len(candidates),
+            returned=len(selected),
+        )
+        return selected, stats
 
     @staticmethod
     def _contextualized_payload(payload: dict) -> str:

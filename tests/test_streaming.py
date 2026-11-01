@@ -137,6 +137,52 @@ class StreamingRuntimeTests(unittest.TestCase):
             [event["occurred_at"] for event in before],
         )
 
+    def test_reconnecting_client_only_receives_unseen_events(self):
+        accepted = self.service.start(
+            self.request(self.root / "missing-for-resume-cursor")
+        )
+        self.service.wait(
+            accepted.run_id,
+            statuses={"failed"},
+            timeout_seconds=30,
+        )
+        everything = [
+            event
+            for event in self.service.iter_events(
+                accepted.run_id,
+                heartbeat_seconds=0.01,
+            )
+            if event is not None
+        ]
+        self.assertGreaterEqual(len(everything), 3)
+        cursor = everything[1]["sequence"]
+        tail = [
+            event
+            for event in self.service.iter_events(
+                accepted.run_id,
+                after_sequence=cursor,
+                heartbeat_seconds=0.01,
+            )
+            if event is not None
+        ]
+        self.assertEqual(tail, everything[2:])
+
+    def test_compiled_graph_is_reused_across_sessions(self):
+        with self.service._graph_session("maintenance") as first:
+            pass
+        with self.service._graph_session("maintenance") as second:
+            pass
+        with self.service._graph_session("project_factory") as studio:
+            pass
+        self.assertIsNot(first, second)
+        self.assertIsNot(first.checkpointer, second.checkpointer)
+        self.assertEqual(
+            sorted(self.service._graph_templates),
+            ["maintenance", "project_factory"],
+        )
+        self.assertIn("client_intake", studio.nodes)
+        self.assertIn("repo_mapper", first.nodes)
+
     def test_framework_failure_rolls_back_unverified_write(self):
         repo = self.copy_repo("framework-rollback")
         target = repo / "src" / "calculator.py"

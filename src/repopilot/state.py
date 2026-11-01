@@ -4,7 +4,10 @@ import operator
 from typing import Annotated, Any, TypedDict
 
 
-STATE_SCHEMA_VERSION = 2
+# v3 adds the maintenance self-correction loop (review revisions, repair
+# attempts, multi-query retrieval) and run metrics. All new keys are optional,
+# so v2 checkpoints still resume.
+STATE_SCHEMA_VERSION = 3
 
 
 class RepoPilotState(TypedDict, total=False):
@@ -29,6 +32,12 @@ class RepoPilotState(TypedDict, total=False):
     test_result: dict[str, Any]
     verification: dict[str, Any]
     reflection: dict[str, Any]
+    retrieval: dict[str, Any]
+    review_revision: int
+    review_feedback: dict[str, Any]
+    repair_attempt: int
+    attempt_history: list[dict[str, Any]]
+    run_metrics: dict[str, Any]
     report: str
     project_name: str
     collaboration_id: str

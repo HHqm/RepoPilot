@@ -165,26 +165,43 @@ class WorkflowTests(unittest.TestCase):
             )
         )
         run = service.wait(accepted.run_id, timeout_seconds=30)
-        service.decide(
-            run.run_id,
-            ApprovalDecision(
-                approved=True,
-                comment="Exercise rollback path",
-                artifact_digest=run.interrupt["artifact_digest"],
-            ),
-        )
-        completed = service.wait(
-            run.run_id,
-            statuses={"failed_rolled_back", "failed"},
-            timeout_seconds=30,
-        )
+        approvals = 0
+        # Every repair attempt is a new patch and must be approved again.
+        while run.status == "awaiting_approval":
+            approvals += 1
+            self.assertEqual(file_hash(target), before, "approval gate leaked")
+            service.decide(
+                run.run_id,
+                ApprovalDecision(
+                    approved=True,
+                    comment="Exercise rollback path",
+                    artifact_digest=run.interrupt["artifact_digest"],
+                ),
+            )
+            run = service.wait(run.run_id, timeout_seconds=60)
+        completed = run
         self.assertEqual(completed.status, "failed_rolled_back")
+        budget = self.settings.max_repair_attempts
+        self.assertEqual(approvals, budget + 1)
+        self.assertEqual(completed.state["repair_attempt"], budget)
+        self.assertEqual(len(completed.state["attempt_history"]), budget + 1)
+        self.assertIn(
+            "forced verifier failure",
+            completed.state["attempt_history"][0]["test_failure"],
+        )
         self.assertFalse(completed.state["test_result"]["success"])
         self.assertEqual(
             completed.state["verification"]["verdict"], "failed_and_rolled_back"
         )
         self.assertEqual(file_hash(target), before)
         self.assertTrue(completed.state["reflection"]["retry_recommended"])
+        # Repair attempts re-retrieve with a query built from the failure.
+        purposes = [
+            item["purpose"] for item in completed.state["retrieval"]["queries"]
+        ]
+        self.assertIn("failure", purposes)
+        self.assertIn("Self-correction history", completed.state["report"])
+        self.assertGreater(completed.state["run_metrics"]["llm_calls"], 0)
 
 
 if __name__ == "__main__":

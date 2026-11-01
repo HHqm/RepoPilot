@@ -1,7 +1,8 @@
+import hashlib
+import shutil
 import tempfile
 import unittest
-import shutil
-import hashlib
+from itertools import pairwise
 from pathlib import Path
 
 from qdrant_client import models
@@ -145,6 +146,58 @@ class HybridRagTests(unittest.TestCase):
         self.assertIn("README.md", index.files)
         self.assertFalse(
             any(path.startswith(".repopilot") for path in index.files)
+        )
+
+    def test_dependency_directories_are_pruned_at_any_depth(self):
+        root = Path(self.temporary.name) / "dependency-pollution"
+        (root / "src").mkdir(parents=True)
+        (root / "src" / "app.py").write_text(
+            "def handler():\n    return 'ok'\n",
+            encoding="utf-8",
+        )
+        for ignored in (
+            Path("node_modules") / "left-pad",
+            Path("packages") / "web" / "node_modules" / "react",
+            Path(".venv") / "lib",
+            Path(".git") / "hooks",
+        ):
+            (root / ignored).mkdir(parents=True)
+            (root / ignored / "index.js").write_text(
+                "module.exports = 1;\n",
+                encoding="utf-8",
+            )
+        index = self.rag.index_repository(root)
+        self.assertEqual(sorted(index.files), ["src/app.py"])
+
+    def test_chunk_windows_respect_budget_and_cover_every_line(self):
+        from repopilot.rag.chunking import StructureAwareChunker
+        from repopilot.rag.embeddings import multilingual_tokens
+
+        chunker = StructureAwareChunker(max_tokens=64, overlap_tokens=16)
+        lines = [
+            f"value_{index} = compute(alpha, beta, gamma)  # 第{index}行"
+            for index in range(200)
+        ]
+        blocks = chunker._split_lines(lines, 1)
+        covered: set[int] = set()
+        previous_start = 0
+        for block in blocks:
+            self.assertGreater(block.start_line, previous_start)
+            previous_start = block.start_line
+            block_lines = block.text.splitlines()
+            covered.update(range(block.start_line, block.end_line + 1))
+            tokens = sum(
+                max(1, len(multilingual_tokens(line))) for line in block_lines
+            )
+            if len(block_lines) > 1:
+                self.assertLessEqual(tokens, 64)
+        self.assertEqual(covered, set(range(1, len(lines) + 1)))
+        self.assertTrue(
+            any(
+                current.start_line <= previous.end_line
+                for previous, current in pairwise(blocks)
+            ),
+            "adjacent windows should overlap",
         )
 
     def test_file_that_becomes_oversized_drops_old_vectors(self):

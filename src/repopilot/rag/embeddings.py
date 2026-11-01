@@ -3,9 +3,10 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from collections.abc import Sequence
 from hashlib import blake2b
 from threading import RLock
-from typing import Protocol, Sequence
+from typing import Protocol
 
 from .types import HybridEmbeddingBatch, SparseEmbedding
 
@@ -24,6 +25,48 @@ def multilingual_tokens(text: str) -> list[str]:
     for run in chinese_runs:
         tokens.extend(run[index : index + 2] for index in range(len(run) - 1))
     return tokens
+
+
+_RAW_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Splits snake_case and camelCase/PascalCase, keeping acronyms intact:
+# "HTTPServerError" -> HTTP, Server, Error; "safe_divide" -> safe, divide.
+_IDENTIFIER_PART = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+")
+
+
+def _english_singular(term: str) -> str | None:
+    """Very light plural folding so "versions" also matches "version"."""
+
+    if len(term) <= 3 or not (term.isascii() and term.isalpha()):
+        return None
+    if term.endswith("ies") and len(term) > 4:
+        return term[:-3] + "y"
+    if term.endswith(("sses", "xes", "ches", "shes")):
+        return term[:-2]
+    if term.endswith("s") and not term.endswith(("ss", "us", "is")):
+        return term[:-1]
+    return None
+
+
+def lexical_terms(text: str) -> list[str]:
+    """Terms for sparse retrieval: tokens plus code-aware expansions.
+
+    Whole identifiers stay as exact-match terms (``safe_divide``), their
+    snake/camel-case parts are added so natural-language queries ("safe
+    divide") still overlap, and English plurals are folded to singular.
+    CJK text keeps the unigram + bigram scheme from ``multilingual_tokens``.
+    """
+
+    terms = multilingual_tokens(text)
+    expansions: list[str] = []
+    for identifier in _RAW_IDENTIFIER.findall(text):
+        parts = [part.lower() for part in _IDENTIFIER_PART.findall(identifier)]
+        if len(parts) > 1:
+            expansions.extend(part for part in parts if len(part) > 1)
+    for term in (*terms, *expansions):
+        singular = _english_singular(term)
+        if singular:
+            expansions.append(singular)
+    return terms + expansions
 
 
 def _stable_index(token: str) -> int:
@@ -59,11 +102,13 @@ class MultilingualSparseEncoder:
     ``Modifier.IDF`` supplies corpus-level inverse document frequency.
     """
 
-    model_id = "repopilot/multilingual-code-sparse-v2"
+    # v3: code-aware identifier splitting and plural folding. Bumping the id
+    # changes the collection fingerprint, so old vectors are rebuilt.
+    model_id = "repopilot/multilingual-code-sparse-v3"
 
     @staticmethod
     def encode(text: str) -> SparseEmbedding:
-        frequencies = Counter(multilingual_tokens(text))
+        frequencies = Counter(lexical_terms(text))
         by_index: dict[int, float] = {}
         for token, frequency in frequencies.items():
             index = _stable_index(token)
@@ -177,7 +222,9 @@ class BgeM3HybridEmbedding:
                 show_progress_bar=False,
                 convert_to_numpy=True,
             )
-        return [[float(value) for value in row] for row in vectors]
+        # ndarray.tolist() converts to Python floats in C instead of boxing
+        # 1024 values per row through a Python-level loop.
+        return vectors.tolist()
 
     def encode_documents(self, texts: Sequence[str]) -> HybridEmbeddingBatch:
         return HybridEmbeddingBatch(
