@@ -1,0 +1,32 @@
+# Secrets and local runtime state must never enter the build context.
+.env
+.env.*
+!.env.example
+.repopilot/
+.repopilot-*/
+workspace/
+artifacts/
+
+# VCS, caches and build output
+.git/
+.github/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+**/*.egg-info/
+
+# Not needed at runtime
+tests/
+screenshots/
+evals/
+scripts/
+docs/
+*.md
+!README.md
+.idea/
+.vscode/

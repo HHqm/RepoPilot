@@ -10,14 +10,18 @@ services:
 
   repopilot:
     build: .
+    # Bound to loopback like Qdrant. Requests from the host reach the container
+    # through the Docker bridge, so set REPOPILOT_API_TOKEN in .env.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     env_file:
       - .env
     environment:
       REPOPILOT_QDRANT_URL: http://qdrant:6333
+      REPOPILOT_WORKSPACE_ROOTS: /workspace
     volumes:
-      - ./.repopilot:/app/.repopilot
+      # Named volume keeps ownership compatible with the non-root image user.
+      - repopilot_data:/app/.repopilot
       - ./workspace:/workspace
     depends_on:
       - qdrant
@@ -25,3 +29,4 @@ services:
 
 volumes:
   qdrant_data:
+  repopilot_data:

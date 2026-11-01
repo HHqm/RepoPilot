@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "repopilot"
-version = "0.6.0"
+dynamic = ["version"]
 description = "A collaborative multi-agent software company with project RAG and ZIP delivery."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
@@ -24,8 +24,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# FastAPI's TestClient is built on httpx.
 test = [
-  "httpx2>=2.9,<3",
+  "httpx>=0.27,<1",
+]
+dev = [
+  "httpx>=0.27,<1",
+  "ruff>=0.6,<1",
 ]
 documents = [
   "numpy>=1.24,<2",
@@ -37,8 +42,32 @@ documents = [
 repopilot = "repopilot.cli:main"
 repopilot-mcp = "repopilot.mcp_server:main"
 
+[tool.setuptools.dynamic]
+version = { attr = "repopilot.__version__" }
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
 repopilot = ["web/*.html", "web/*.css", "web/*.js", "web/*.svg"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+src = ["src", "tests", "scripts"]
+extend-exclude = [".repopilot*", "examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP"]
+ignore = [
+  # Long Chinese prompt strings and URLs read better unwrapped.
+  "E501",
+  # FastAPI declares request parameters with File(...)/Depends(...) defaults.
+  "B008",
+  # Keep explicit "utf-8" arguments; they document the wire format.
+  "UP012",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["repopilot"]
+lines-after-imports = 2
