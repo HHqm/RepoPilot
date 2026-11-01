@@ -1,5 +1,8 @@
 # RepoPilot 架构说明
 
+本文是总览。Agent 编排细节（状态图、自我修正回路、决策契约、失败边界）见
+[AGENT_DESIGN.md](AGENT_DESIGN.md)，检索与评测见 [RAG.md](RAG.md)。
+
 ## 总体流程
 
 ```text
@@ -13,9 +16,9 @@ PRD + 会议纪要 + 风险清单 → Human 门禁 1
     ↓
 项目规划 → 架构设计 → 任务拆解 → 多语言代码生成
     ↓
-静态安全规则 + Reviewer → QA 测试 → 有限返工
+静态安全规则 + Reviewer → QA 测试 → 有限返工（QA / 审查 / 客户修改共享预算）
     ↓
-部署指导 → Human 门禁 2 → ZIP 交付
+部署指导 → Human 门禁 2（确认 / 退回修改 / 终止）→ ZIP 交付
 ```
 
 ## Agent 与状态契约

@@ -1,4 +1,9 @@
-# RepoPilot 0.6.0
+# RepoPilot
+
+[![CI](https://github.com/HHqm/RepoPilot/actions/workflows/ci.yml/badge.svg)](https://github.com/HHqm/RepoPilot/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue)
+![LangGraph](https://img.shields.io/badge/orchestration-LangGraph-6f42c1)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 RepoPilot 是一个客户协作式多智能体软件公司：
 
@@ -14,7 +19,14 @@ RepoPilot 是一个客户协作式多智能体软件公司：
 → ZIP 源码与详细指南交付
 ```
 
-完整设计见 [项目.md](项目.md)。
+| 文档 | 内容 |
+| --- | --- |
+| [docs/AGENT_DESIGN.md](docs/AGENT_DESIGN.md) | 两条工作流的状态图、有界自我修正回路、检索规划、人工决策契约、失败边界 |
+| [docs/RAG.md](docs/RAG.md) | 增量索引、向量缓存、混合检索、代码感知稀疏向量、评测方法与消融结果 |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 架构总览 |
+| [docs/DESIGN.md](docs/DESIGN.md) | 产品与系统完整设计 |
+| [docs/ENGINEERING_AUDIT.md](docs/ENGINEERING_AUDIT.md) | 工程审计与整改记录 |
+| [docs/E2E_REPORT_DEEPSEEK.md](docs/E2E_REPORT_DEEPSEEK.md) | 真实 DeepSeek 全链路验收 |
 
 ## 界面预览
 
@@ -29,12 +41,16 @@ RepoPilot 是一个客户协作式多智能体软件公司：
 - 聊天优先首页：无需先填表，首次发送消息或上传文件时自动创建项目会话；
 - 客户—产品经理持续项目会话；
 - PDF、Word、Excel、PPT、文本和代码上传；
-- Docling/pypdf 解析、秘密脱敏和项目隔离 RAG；
+- Docling/pypdf 解析、秘密脱敏和项目隔离 RAG；stat + SHA-256 两级增量索引、内容寻址向量缓存、
+  索引与向量库不一致时自动重建；
 - 需求澄清会议、风险规避和任务拆解；
 - Python、Java、Go、C++、TypeScript/JavaScript；
-- LangGraph 双 Human-in-the-loop；
-- 产物摘要绑定的双 Human-in-the-loop；
-- 静态 QA 预检报告和最多两轮开发返工；
+- LangGraph 双 Human-in-the-loop，审批绑定产物 SHA-256 摘要，拒绝过期审批；
+- 客户可以“确认 / 退回修改 / 终止项目”；QA 缺陷、发布审查意见和客户修改要求共享两轮开发返工预算；
+- 仓库维护 Agent 带有界自我修正：审查拒绝后带着 findings 修订，测试失败后回滚、复盘，
+  再用失败信息重新检索和规划，每个新补丁都要重新人工审批；
+- 多查询检索规划（Issue / 代码符号 / 失败 traceback）+ RRF 融合；
+- 每次运行汇总 LLM 调用次数、token 用量与各 Agent 耗时；
 - SQLite 持久化 SSE 事件与跨重启原序号回放；
 - 结构化输出校验和一次有界修复；
 - 项目内部文档回写后供后续 Agent 再检索；
@@ -44,26 +60,48 @@ RepoPilot 是一个客户协作式多智能体软件公司：
 - 前端 BYOK 模型中心、动态 `/models` 发现和自定义 OpenAI-compatible Base URL；
 - DeepSeek、OpenAI、通义千问、豆包、智谱、Kimi、Gemini、ZZSHU、Ollama 和自定义兼容端点预设。
 
+## 工程质量
+
+| 维度 | 做法 |
+| --- | --- |
+| 持续集成 | GitHub Actions：Ruff 静态检查、Python 3.11/3.12 矩阵测试、Mock 端到端工作流评测、34 条检索基准质量门禁（Recall@5 ≥ 0.65、MRR ≥ 0.6，离线模型）、Docker 镜像构建 |
+| 测试 | 97 项 `unittest`，全部离线运行（Mock LLM + 确定性向量），不需要 API Key |
+| 可观测性 | 每个 Agent 产出结构化 trace（含检索各阶段耗时）；运行报告汇总成本与耗时；SSE 事件写入 SQLite，支持 `Last-Event-ID` 断线续传 |
+| 评测 | 34 条带标注检索基准、6 种检索配置消融（`scripts/evaluate_retrieval.py --ablation`）：真实模型下生产配置 Recall@5 0.897、MRR 0.882，重排在混合召回基础上 MRR +0.078（[报告](docs/RAG_EVALUATION.md)）；Mock 端到端工作流评测 |
+| 安全 | Bearer Token / 回环限制、SSRF 防护、BYOK 密钥只驻留内存、宿主机测试默认关闭、上传与索引脱敏 |
+| 部署 | 非 root 容器、`HEALTHCHECK`、依赖层与源码层分离缓存、`.dockerignore` 排除密钥与运行数据 |
+
+### 性能基准
+
+运行时热点经过逐项剖析和优化。下表由 `python scripts/benchmark_runtime.py` 在同一台
+Windows 11 开发机（Python 3.11）上分别对 v0.6.0 初版和当前代码测得：
+
+| 热点路径 | 优化前 | 优化后 | 提升 | 手段 |
+| --- | ---: | ---: | ---: | --- |
+| 冷启动查询运行状态（`GET /runs/{id}`） | 17.4 ms | 0.73 ms | ~24× | LangGraph 图只编译一次，按会话 `copy()` 绑定 checkpointer |
+| 发布一条 SSE 事件 | 12.3 ms | 0.11 ms | ~110× | 事件库复用长连接 + WAL `synchronous=NORMAL`，序号 O(1) 递增 |
+| 扫描含 3000 个依赖文件的仓库 | 800 ms | 7.8 ms | ~100× | `os.walk` 遍历时剪枝 `node_modules/.git/.venv`，不跟随符号链接 |
+| 切分 2 万行源码 | 155 ms | 99 ms | ~1.6× | 每行只分词一次，窗口与重叠复用 token 计数 |
+
+基准完全离线，在临时目录中运行，不会连接正在运行的服务或模型 API。
+
 ## 环境
 
-项目使用：
-
-```text
-D:\envs\lstd
-```
-
-安装：
+需要 Python 3.11 或 3.12：
 
 ```powershell
-cd D:\gptbot\RepoPilot
-D:\envs\lstd\python.exe -m pip install -e .
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1        # Linux/macOS: source .venv/bin/activate
+pip install -e ".[dev]"
 ```
 
 如需复杂 PDF、Office、扫描件和表格解析：
 
 ```powershell
-D:\envs\lstd\python.exe -m pip install -e ".[documents]"
+pip install -e ".[documents]"
 ```
+
+也可以用 `environment.yml` 创建 Conda 环境。
 
 ## 配置
 
@@ -80,8 +118,8 @@ REPOPILOT_RAG_EMBEDDING_MODEL=BAAI/bge-m3
 REPOPILOT_RAG_RERANKER_PROVIDER=bge
 REPOPILOT_RAG_RERANKER_MODEL=BAAI/bge-reranker-v2-m3
 
-# 限制维护工作流只能读取这些工作区；Windows 使用分号分隔。
-REPOPILOT_WORKSPACE_ROOTS=D:\gptbot
+# 限制维护工作流只能读取这些工作区；Windows 使用分号分隔，留空为当前目录。
+REPOPILOT_WORKSPACE_ROOTS=D:\workspace
 # 远程访问必须配置 Bearer Token；仅 127.0.0.1 使用时可留空。
 REPOPILOT_API_TOKEN=
 # 默认禁止在宿主机执行仓库测试。
@@ -122,8 +160,14 @@ Ollama、vLLM 和企业内网模型需要管理员显式设置
 ## 启动
 
 ```powershell
-cd D:\gptbot\RepoPilot
-D:\envs\lstd\python.exe -m uvicorn repopilot.api:app --host 127.0.0.1 --port 8000
+python -m uvicorn repopilot.api:app --host 127.0.0.1 --port 8000
+```
+
+或使用 Docker Compose（同时启动 Qdrant Server；需先在 `.env` 中设置
+`REPOPILOT_API_TOKEN`，因为宿主机请求经 Docker 网桥到达，不属于回环地址）：
+
+```powershell
+docker compose up --build
 ```
 
 打开：
@@ -141,7 +185,7 @@ D:\envs\lstd\python.exe -m uvicorn repopilot.api:app --host 127.0.0.1 --port 800
 | POST | `/project-sessions/{id}/files` | 上传资料并进入 RAG |
 | POST | `/project-sessions/{id}/launch` | 召开需求评审会 |
 | GET | `/runs/{id}/events` | SSE 实时事件 |
-| POST | `/runs/{id}/decision` | 客户确认/退回 |
+| POST | `/runs/{id}/decision` | 客户确认 / 退回修改 / 终止（`approved`、`comment`、`terminate`、`artifact_digest`） |
 | GET | `/runs/{id}/download` | 下载最终 ZIP |
 | GET | `/model-providers/catalog` | 读取供应商预设 |
 | GET/POST | `/model-providers/credentials` | 查询或连接本次进程的 BYOK 凭证 |
@@ -152,23 +196,24 @@ D:\envs\lstd\python.exe -m uvicorn repopilot.api:app --host 127.0.0.1 --port 800
 ## 测试
 
 ```powershell
-cd D:\gptbot\RepoPilot
-D:\envs\lstd\python.exe -m unittest discover -s tests -v
-D:\envs\lstd\python.exe -m pip check
+ruff check src tests scripts
+python -m unittest discover -s tests -v
+python -m pip check
 ```
 
 测试和检索评测使用独立临时运行目录，不会连接正在运行的服务所占用的
 Qdrant Local，也不会写入生产 Qdrant 集合。因此可以在本地服务保持启动时执行：
 
 ```powershell
-D:\envs\lstd\python.exe scripts\evaluate_retrieval.py
-D:\envs\lstd\python.exe scripts\evaluate.py
+python scripts\evaluate_retrieval.py --min-recall 0.65 --min-mrr 0.6
+python scripts\evaluate.py
+python scripts\benchmark_runtime.py
 ```
 
 真实 DeepSeek 极小端到端验收（会产生 API 费用，并自动批准本地测试项目的两个人工门禁）：
 
 ```powershell
-D:\envs\lstd\python.exe scripts\smoke_deepseek_tiny_e2e.py
+python scripts\smoke_deepseek_tiny_e2e.py
 ```
 
 该脚本会上传一份极小规格，完整经过产品对话、项目 RAG、需求会议、双审批、代码生成、

@@ -3,10 +3,16 @@
 ## 本地检查
 
 ```powershell
-D:\envs\lstd\python.exe -m unittest discover -s tests -v
-D:\envs\lstd\python.exe -m pip check
+pip install -e ".[dev]"
+ruff check src tests scripts
+python -m unittest discover -s tests -v
+python -m pip check
 node --check src\repopilot\web\app.js
 ```
+
+以上检查与 CI（`.github/workflows/ci.yml`）一致；涉及检索或运行时热点的改动，请同时运行
+`python scripts\evaluate_retrieval.py --min-recall 0.65 --min-mrr 0.6` 与
+`python scripts\benchmark_runtime.py`，并在 PR 中附上前后对比。
 
 默认测试使用 MockLLM，不需要外部 API Key，也不应把真实密钥加入测试。新增 Agent 时，请同时补充输入/输出模型、路由条件、失败路径、trace 字段和最小单元测试；新增工具时，请补充路径、参数、超时和权限边界测试。
 

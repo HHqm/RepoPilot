@@ -1,6 +1,6 @@
 # RepoPilot 使用与部署教程
 
-本文面向第一次运行 RepoPilot 的用户，覆盖本地 Mock 演示、DeepSeek 调用、文件上传、人工审批、RAG 和交付包下载。默认平台为 Windows 10/11，项目环境为 `D:\envs\lstd`。
+本文面向第一次运行 RepoPilot 的用户，覆盖本地 Mock 演示、DeepSeek 调用、文件上传、人工审批、RAG 和交付包下载。默认平台为 Windows 10/11，Linux/macOS 只需把路径分隔符换成 `/`。
 
 ## 1. 获取代码与准备环境
 
@@ -8,14 +8,16 @@
 git clone https://github.com/HHqm/RepoPilot.git
 cd RepoPilot
 
-# 推荐显式使用项目环境，避免误用系统 Python
-D:\envs\lstd\python.exe -m pip install -e .
+# 推荐使用独立虚拟环境，避免污染系统 Python
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e .
 
 # 需要 PDF/Word/Excel/PPT/OCR 等解析能力时再安装可选依赖
-D:\envs\lstd\python.exe -m pip install -e ".[documents]"
+python -m pip install -e ".[documents]"
 ```
 
-如果还没有环境，可用仓库中的 `environment.yml` 创建基础环境；随后仍建议确认 `D:\envs\lstd\python.exe --version` 与 `D:\envs\lstd\python.exe -m pip --version` 指向同一环境。
+如果还没有环境，可用仓库中的 `environment.yml` 创建基础环境；随后确认 `python --version` 与 `python -m pip --version` 指向同一环境。
 
 ## 2. 配置文件与密钥边界
 
@@ -39,7 +41,7 @@ DEEPSEEK_MODEL=deepseek-v4-pro
 
 ```powershell
 cd D:\gptbot\RepoPilot
-D:\envs\lstd\python.exe -m uvicorn repopilot.api:app --host 127.0.0.1 --port 8000
+python -m uvicorn repopilot.api:app --host 127.0.0.1 --port 8000
 ```
 
 打开 <http://127.0.0.1:8000/>。API 文档在 <http://127.0.0.1:8000/docs>。
@@ -70,14 +72,14 @@ docker compose up -d qdrant
 
 ```powershell
 # 不调用外部模型，完整跑单元测试
-D:\envs\lstd\python.exe -m unittest discover -s tests -v
-D:\envs\lstd\python.exe -m pip check
+python -m unittest discover -s tests -v
+python -m pip check
 
 # 检索评测（使用临时目录）
-D:\envs\lstd\python.exe scripts\evaluate_retrieval.py
+python scripts\evaluate_retrieval.py
 
 # 极小 DeepSeek 端到端冒烟测试，会产生 API 费用
-D:\envs\lstd\python.exe scripts\smoke_deepseek_tiny_e2e.py
+python scripts\smoke_deepseek_tiny_e2e.py
 ```
 
 如果页面无法打开，先检查 8000 端口和 uvicorn 日志；如果模型连接失败，先在模型中心点击验证，再确认 Base URL 以 `/v1` 结尾的第三方 OpenAI-compatible 服务是否允许当前网络访问。不要通过 `REPOPILOT_ALLOW_PRIVATE_MODEL_ENDPOINTS=1` 绕过 SSRF 防护，除非是在可信内网部署。
