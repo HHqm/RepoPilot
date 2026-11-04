@@ -93,7 +93,7 @@ BUILTIN_PROVIDER_CATALOG: tuple[dict[str, Any], ...] = (
         "base_url": "https://zzshu.cc/v1",
         "supports_model_discovery": True,
         "supports_json_object": True,
-        "description": "用户指定的第三方 OpenAI-compatible 网关。",
+        "description": "第三方 OpenAI-compatible 网关。",
     },
     {
         "preset_id": "ollama",

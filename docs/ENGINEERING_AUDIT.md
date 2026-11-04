@@ -8,7 +8,7 @@ Human-in-the-loop、持久化、可观测性、评测和前端契约。
 
 RepoPilot 已经超过“多个角色轮流对话”的 Demo 水平，具备真实状态图、
 结构化产物、确定性边界、人工审批、原子写入、回滚、增量混合 RAG 和实时
-SSE。作为求职项目，当前最有说服力的部分是：
+SSE。当前最关键的工程特性是：
 
 - LangGraph 节点拥有不同输入、输出和失败路由；
 - Planner/Coder/Reviewer 的文件与证据引用会被程序校验；
@@ -19,7 +19,7 @@ SSE。作为求职项目，当前最有说服力的部分是：
 - Qdrant 检索强制 `repo_id` 隔离，并有跨仓库泄漏回归测试；
 - SSE 是后台工作流产生的真实增量事件，不是前端伪造。
 
-当前定位应表述为：**安全的单机开发/面试演示版**。在加入认证、隔离执行、
+当前定位应表述为：**安全的单机开发/演示版**。在加入认证、隔离执行、
 持久化事件和崩溃恢复前，不应表述为可直接承载多租户生产仓库的 SaaS。
 
 ### 2026-07-28 复审与整改状态
@@ -59,7 +59,6 @@ SSE。作为求职项目，当前最有说服力的部分是：
 - 环境清理不能代替 Docker/gVisor/Firecracker 的内核级执行隔离；
 - SQLite Event Store 适合单机，水平扩展仍应迁移 PostgreSQL + Task Queue；
 - Qdrant Local 适合单进程；多 Worker/多容器必须改用 Qdrant Server；
-- 已在聊天中公开过的真实 API Key 必须由账户持有人在控制台撤销并轮换；
 - 进程在文件已应用后被强杀的恢复，仍推荐用 Git worktree + WAL Recovery
   Reconciler 完成。
 
@@ -189,16 +188,6 @@ SSE。作为求职项目，当前最有说服力的部分是：
 - 重复执行回滚不会破坏已恢复文件；
 - 回滚前校验应用后 SHA，避免覆盖用户随后产生的新修改。
 
-### P0-4 已公开的 API Key 必须轮换
-
-当前 Key 曾在聊天中以明文出现。即使接口验证成功，也应视为已泄露凭据。
-
-解决：
-
-- 在 DeepSeek 控制台撤销旧 Key；
-- 创建新 Key，只写入本机 `.env` 或 Windows Credential Manager；
-- 生产使用 Vault、AWS Secrets Manager、Azure Key Vault 或 Kubernetes Secret；
-- 增加凭据轮换流程和额度告警。
 
 ## 4. P1：从优秀 Demo 升级为生产级 Agent
 
@@ -350,7 +339,7 @@ SSE。作为求职项目，当前最有说服力的部分是：
 - 生成修改后运行 AST parse/formatter，再进入 Reviewer；
 - 不允许 Coder 直接调用写工具。
 
-## 5. P2：工程成熟度与求职展示增强
+## 5. P2：工程成熟度增强
 
 ### P2-1 评测集太小
 
@@ -413,7 +402,7 @@ Checkpoint、Qdrant 和 `state.json` 会保存 Evidence 文本和完整 `new_con
 
 ## 6. 推荐实施顺序
 
-1. **安全底座**：轮换 Key、API 认证、workspace allowlist、测试容器沙箱；
+1. **安全底座**：API 认证、workspace allowlist、测试容器沙箱；
 2. **写入可靠性**：git worktree、执行日志、启动恢复、幂等回滚；
 3. **持久化运行时**：PostgresSaver、事件表、任务队列、TTL；
 4. **模型可靠性**：结构化 Repair、分类重试、预算、并发 Usage；
@@ -421,15 +410,15 @@ Checkpoint、Qdrant 和 `state.json` 会保存 Evidence 文本和完整 `new_con
 6. **评测与观测**：扩充 Eval、OpenTelemetry、Prometheus/Grafana；
 7. **高级 Agent 能力**：受控只读工具循环、多 Reviewer 和静态分析门禁。
 
-## 7. 面试表达建议
+## 7. 能力边界
 
-应强调：
+设计原则：
 
 > RepoPilot 的 Agent 自主性被限制在可验证边界内：模型负责提出计划、定点编辑和
 > 语义审查，程序负责路径、证据、哈希、命令、审批和回滚。自主性越高，确定性
 > 治理越强。
 
-不要声称：
+目前不能等同于：
 
 - SQLite Local Mode 已等同多实例生产；
 - 白名单命令已等同安全沙箱；

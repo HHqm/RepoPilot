@@ -149,8 +149,6 @@ OS、网络、子进程和动态执行调用仍拒绝。修正后 20 项测试�
   Docker/gVisor/Firecracker 或客户 CI/目标环境验证；
 - Qdrant Local 适合单进程本地模式，多 Worker/多容器应使用 Qdrant Server；
 - SQLite Event Store 适合单机，水平扩展应迁移 PostgreSQL 与任务队列；
-- 当前 API Key 曾在聊天中公开，必须在 DeepSeek 控制台撤销并更换，不能继续视为
-  安全密钥。
 
 ## 7. 可复现命令
 

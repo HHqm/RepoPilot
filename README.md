@@ -141,14 +141,6 @@ REPOPILOT_ALLOW_PRIVATE_MODEL_ENDPOINTS=0
 5. 选择单一、均衡、交叉审查或高级自定义路由；
 6. 为产品、总监、项目、架构、开发、DevOps、QA 和发布审查 Agent 分配模型。
 
-用户指定的 ZZSHU 网关已经预置：
-
-```text
-供应商：ZZSHU 第三方网关
-Base URL：https://zzshu.cc/v1
-协议：OpenAI-compatible
-```
-
 用户 API Key 仅保存在当前后端服务进程的内存中。浏览器不使用
 `localStorage/sessionStorage` 保存密钥，项目会话、LangGraph Checkpoint、RAG、
 Trace 和 ZIP 只保存 `credential_id`、供应商和模型。服务重启后需要重新连接
